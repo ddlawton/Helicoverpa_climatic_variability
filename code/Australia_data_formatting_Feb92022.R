@@ -75,4 +75,5 @@ Baker_dat <- rbind(punc,arm) %>%
   mutate(Date = as.Date(paste0(before,"-",Week,"-","1"), "%Y-%U-%u"),
          mean_count = as.numeric(mean_count),Week = as.integer(Week))
 
+write.csv(Baker_dat,file="data/processed/AUS_data/Baker_dat.csv")
 
