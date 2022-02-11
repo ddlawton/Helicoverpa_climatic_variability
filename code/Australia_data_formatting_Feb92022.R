@@ -14,6 +14,7 @@ library(tidyverse)
 library(lubridate)
 library(readxl)
 
+
 # Data given to me by Myron Zalucki
 #####
 
@@ -34,10 +35,14 @@ dat2 <- read.csv("data/raw/AUS_dat/myron_data/helic015_catch.csv",header=FALSE) 
   mutate(dataset = "helic015", H_arm = H_arm_f + H_arm_m, H_punc = H_punc_f + H_punc_m,trap_type = "BL_12_V") %>%
   select(2:3,9:12)
 
+trap_coords <- read.csv("data/raw/AUS_dat/myron_data/trap_data_with_coords.csv") %>%
+  select(!trap_name) 
 
 # lets combined the data
 
-combined_dat <- rbind(dat,dat2)
+combined_dat <- rbind(dat,dat2) %>% left_join(trap_coords,by=c("Trap" = "trap_code"))
+
+write.csv(combined_dat,file="data/processed/AUS_data/myron_data.csv")
 
 
 #####
