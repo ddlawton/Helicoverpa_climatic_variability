@@ -23,8 +23,38 @@ Myron_data <- readcsv("data/processed/AUS_data/myron_data.csv") %>%
 Baker_data <- readcsv("data/processed/AUS_data/Baker_dat.csv") %>%
   mutate(Species = factor(Species), Date = as.Date(Date), dataset= factor(dataset))
 
+#Myron Data
 
-#looking at the Baker_data first
+trap_years_operated <- Myron_data %>% group_by(Trap) %>%
+  summarize(min = min(Date),mean=mean(Date), max=max(Date),years_operated=as.numeric(difftime(max,min,units="days"))/365) %>%
+  dplyr::arrange(desc(years_operated))
+
+
+trap_years_operated_graph <- trap_years_operated %>% select(1,5) %>%
+  ggplot(aes(x=reorder(Trap, -years_operated),y=years_operated)) + geom_col() +
+  theme_pubr() + 
+  theme(axis.text.x = element_text(angle = 45))
+trap_years_operated_graph
+
+
+trap_years_operated <- Myron_data %>% group_by(Trap) %>%
+  summarize(min = min(Date),mean=mean(Date), max=max(Date),years_operated=as.numeric(difftime(max,min,units="days"))/365) %>%
+  dplyr::arrange(desc(years_operated))
+
+Myron_data %>%
+  group_by(Trap) %>%
+  summarize(Date_min = min(Date,na.rm = TRUE),Date_mean = mean(Date,na.rm = TRUE),Date_max = max(Date,na.rm = TRUE), year_range = as.numeric(difftime(Date_max,Date_min,units="auto")/365),
+            punc_count_min = min(H_punc,na.rm = TRUE), punc_count_mean = mean(H_punc,na.rm = TRUE),punc_count_max = max(H_punc,na.rm = TRUE),
+            arm_count_min = min(H_arm,na.rm = TRUE), arm_count_mean = mean(H_arm,na.rm = TRUE),arm_count_max = max(H_arm,na.rm = TRUE))  %>%
+  dplyr::arrange(desc(year_range))
+
+view(Myron_data %>%
+  mutate(year = year(Date)) %>%
+  group_by(Trap,year) %>%
+  summarise(H_arm_mean = mean(H_arm),H_punc = mean(H_punc), num_obs = length(.),Latitude = first(Latitude), Longitude = first(Longitude)))
+
+
+#Baker Data
 
 ridgelines <- Baker_data %>% 
   mutate(logged_mean = log1p(mean_count)) %>%
