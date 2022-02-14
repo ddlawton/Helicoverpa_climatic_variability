@@ -42,6 +42,7 @@ trap_coords <- read.csv("data/raw/AUS_dat/myron_data/trap_data_with_coords.csv")
 
 combined_dat <- rbind(dat,dat2) %>% left_join(trap_coords,by=c("Trap" = "trap_code"))
 
+
 write.csv(combined_dat,file="data/processed/AUS_data/myron_data.csv")
 
 
