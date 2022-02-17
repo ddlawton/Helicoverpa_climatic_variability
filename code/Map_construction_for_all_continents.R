@@ -135,34 +135,48 @@ US_out <- ne_countries(country="United States of America") %>% st_as_sf() %>% se
 CA_out <- ne_countries(country="Canada") %>%  st_as_sf() %>% select(geometry)
 NA_outline <- rbind(US_out, CA_out)
 plot(NA_outline)
+
 US_out <- ne_states(country="United States of America") %>% st_as_sf() %>% 
   filter(name %in% state.name) %>% filter(name != "Hawaii") %>% select(geometry)
+
+MX_out <- ne_states(country="Mexico") %>% st_as_sf()  %>% select(geometry)
+
+
 CA_out <- ne_states(country="Canada") %>%  st_as_sf() %>% filter(name != "Prince Edward Island") %>% select(geometry)
 
-NA_map <- rbind(US_out, CA_out)
-?point.in.poly
-yearly_filter <- st_intersection(US_yearly,NA_map)
 
-p1 <- ggplot(data=NA_map) + 
+NA_map <- rbind(US_out, CA_out, MX_out)
+
+test_map <- st_crop(NA_map,xmin=-123,xmax = -62,ymin=25,ymax=50)
+
+
+yearly_filter <- st_intersection(US_yearly,NA_map)
+weekly_filter <- st_intersection(US_weekly,NA_map)
+
+
+p1 <- ggplot(data=test_map) + 
   geom_sf(aes(geometry=geometry)) + 
-  geom_sf(data=yearly_filter,aes(geometry=geometry)) +
+  geom_sf(data=yearly_filter,aes(geometry=geometry),size=0.65) +
   theme_void() +
-  scale_x_continuous(limits=c(-125,-65),breaks = c(-120,-95,-70)) +
-  scale_y_continuous(limits=c(25,50),breaks = c(30,40,50)) +
+  #scale_x_continuous(limits=c(-123,-62),breaks = c(-120,-95,-70)) +
+  #scale_y_continuous(limits=c(25,50),breaks = c(30,40,50)) +
   theme(panel.background = element_rect(fill = '#9ac6d7')) + ylab("Latitude") + xlab("Longitude")
 
 p1
 
 
-yearly_plot <- ggplot(data=AUS) + 
+yearly_plot <- ggplot(data=NA_map) + 
   geom_sf(aes(geometry=geometry)) + 
-  geom_sf(data=dat2,aes(geometry=geometry,size=log1p(Helio))) +
-  scale_x_continuous(breaks = c(120,130,140,150)) +
-  scale_y_continuous(limits=c(-45,-9),breaks = c(-40,-30,-20,-10)) + 
+  geom_sf(data=yearly_filter,aes(geometry=geometry,size=log1p(CEW_mean),fill=log1p(CEW_mean)),pch=21) +
+  scale_x_continuous(limits=c(-123,-62),breaks = c(-120,-95,-70)) +
+  scale_y_continuous(limits=c(25,50),breaks = c(30,40,50)) +
   theme_void() +
   scale_size_continuous(guide = guide_legend(direction = "horizontal", title.position = "top",
                                              label.position="bottom", label.hjust = 0.5, label.vjust = 0.5)) +
-  theme(legend.position=c(0.25,0.20)) +
+  viridis::scale_fill_viridis(guide = guide_legend(direction = "horizontal", title.position = "top",
+                                             label.position="bottom", label.hjust = 0.5, label.vjust = 0.5)) +
+  theme(legend.position=c(0.85,0.20)) +
+  
   #ggsn::scalebar(x.min = 110, x.max = 155, 
   #               y.min = -45, y.max = -9, 
   #               dist = 500, transform = TRUE, 
@@ -171,21 +185,21 @@ yearly_plot <- ggplot(data=AUS) +
   #north(x.min = 110, x.max = 155, 
   #      y.min = -45, y.max = -9) +
   theme(panel.background = element_rect(fill = '#9ac6d7')) + 
-  guides(size = "none") +
-  theme(legend.position = c(0.3, 0.1)) +
   transition_manual(year) +
-  labs(title = 'Logged helicoverpa catches during {current_frame} in Australia') +
-  theme(text = element_text(size=30),legend.title = element_blank())
+  labs(title = 'Logged Helicoverpa zea catches during {current_frame} in United States') +
+  theme(text = element_text(size=20),legend.title = element_blank())
 
-weekly_plot <- ggplot(data=AUS) + 
+weekly_plot <- ggplot(data=NA_map) + 
   geom_sf(aes(geometry=geometry)) + 
-  geom_sf(data=dat3,aes(geometry=geometry,size=log1p(Helio)))+
-  scale_x_continuous(breaks = c(120,130,140,150)) +
-  scale_y_continuous(limits=c(-45,-9),breaks = c(-40,-30,-20,-10)) + 
+  geom_sf(data=weekly_filter,aes(geometry=geometry,size=log1p(CEW_mean),fill=log1p(CEW_mean)),pch=21)+
+  scale_x_continuous(limits=c(-123,-62),breaks = c(-120,-95,-70)) +
+  scale_y_continuous(limits=c(25,50),breaks = c(30,40,50)) + 
   theme_void() +
   scale_size_continuous(guide = guide_legend(direction = "horizontal", title.position = "top",
                                              label.position="bottom", label.hjust = 0.5, label.vjust = 0.5)) +
-  theme(legend.position=c(0.25,0.20)) +
+  viridis::scale_fill_viridis(guide = guide_legend(direction = "horizontal", title.position = "top",
+                                                   label.position="bottom", label.hjust = 0.5, label.vjust = 0.5)) +
+  theme(legend.position=c(0.85,0.20)) +
   #ggsn::scalebar(x.min = 110, x.max = 155, 
   #               y.min = -45, y.max = -9, 
   #               dist = 500, transform = TRUE, 
@@ -195,14 +209,14 @@ weekly_plot <- ggplot(data=AUS) +
   #      y.min = -45, y.max = -9) +
   theme(panel.background = element_rect(fill = '#9ac6d7')) + 
   transition_manual(woy) +
-  labs(title = 'Logged helicoverpa catches for week of year {current_frame} in Australia') +
-  theme(text = element_text(size=30),legend.title = element_blank())
+  labs(title = 'Logged Helicoverpa catches for week of year {current_frame} in United States') +
+  theme(text = element_text(size=25),legend.title = element_blank())
 
-plot_ratio <- get_asp_ratio(AUS_outline)
+plot_ratio <- get_asp_ratio(NA_outline)
 ggsave('p1.png', plot=p1, width = plot_ratio*5, height=5,dpi=600)
 
 
-anim_save("output/maps/yearly_Australia_Helio_catches.gif",yearly_plot, height = 960, width=960)
-anim_save("output/maps/weekly_Australia_Helio_catches.gif",weekly_plot, height = 960, width=960)
+anim_save("output/maps/yearly_US_Helio_catches.gif",yearly_plot, height = 613.33, width=1150)
+anim_save("output/maps/weekly_US_Helio_catches.gif",weekly_plot, height = 613.33, width=1150)
 ggsave(p1,file="output/maps/Australia_trap_locations.png",dpi=600,width = 10,height=10,units="in")
 
