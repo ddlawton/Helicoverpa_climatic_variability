@@ -9,18 +9,16 @@ library(lubridate)
 library(ggridges)
 library(viridis)
 library(ggpubr)
+library(patchwork)
 
 rm(list=ls())
 
-readcsv <- function(direct) {
-  dat <- read.csv(direct) %>% as_tibble()
-  return(dat)
-}
 
-Myron_data <- readcsv("data/processed/AUS_data/myron_data.csv") %>%
-  mutate(Trap = factor(Trap), Date = as.Date(Date), dataset= factor(dataset), trap_type = factor(trap_type))
+Myron_data <- read_csv("data/processed/AUS_data/myron_data.csv") %>%
+  mutate(Trap = factor(Trap), Date = as.Date(Date), dataset= factor(dataset), trap_type = factor(trap_type),
+         Date = as.Date(Date), year = year(Date), woy = isoweek(Date))
 
-Baker_data <- readcsv("data/processed/AUS_data/Baker_dat.csv") %>%
+Baker_data <- read_csv("data/processed/AUS_data/Baker_dat.csv") %>%
   mutate(Species = factor(Species), Date = as.Date(Date), dataset= factor(dataset))
 
 #Myron Data
@@ -33,7 +31,9 @@ trap_years_operated <- Myron_data %>% group_by(Trap) %>%
 trap_years_operated_graph <- trap_years_operated %>% select(1,5) %>%
   ggplot(aes(x=reorder(Trap, -years_operated),y=years_operated)) + geom_col() +
   theme_pubr() + 
-  theme(axis.text.x = element_text(angle = 45))
+  theme(axis.text.x = element_text(angle = 45)) +
+  ylab("Years operated") +
+  xlab("Traps")
 trap_years_operated_graph
 
 
@@ -48,10 +48,110 @@ Myron_data %>%
             arm_count_min = min(H_arm,na.rm = TRUE), arm_count_mean = mean(H_arm,na.rm = TRUE),arm_count_max = max(H_arm,na.rm = TRUE))  %>%
   dplyr::arrange(desc(year_range))
 
-view(Myron_data %>%
-  mutate(year = year(Date)) %>%
-  group_by(Trap,year) %>%
-  summarise(H_arm_mean = mean(H_arm),H_punc = mean(H_punc), num_obs = length(.),Latitude = first(Latitude), Longitude = first(Longitude)))
+
+
+catch_mean_year <- Myron_data %>%
+  pivot_longer(cols=(starts_with("H_")),names_to = "Species",values_to = "count") %>%
+  group_by(year,Species) %>%
+  summarize(Count_mean = mean(count,na.rm = TRUE)) %>%
+  ggplot(aes(x=(year),y=Count_mean,color=Species)) + geom_point() +
+  geom_smooth(se=FALSE) +
+  theme_pubr() + ylab("Moth yearly mean catch")
+
+
+catch_median_year <- Myron_data %>%
+  pivot_longer(cols=(starts_with("H_")),names_to = "Species",values_to = "count") %>%
+  group_by(year,Species) %>%
+  summarize(Count_mean = median(count,na.rm = TRUE)) %>%
+  ggplot(aes(x=(year),y=Count_mean,color=Species)) + geom_point() +
+  geom_smooth(se=FALSE) +
+  theme_pubr() + ylab("Moth yearly median catch")
+
+catch_sum_year <- Myron_data %>%
+  pivot_longer(cols=(starts_with("H_")),names_to = "Species",values_to = "count") %>%
+  group_by(year,Species) %>%
+  summarize(Count_mean = sum(count,na.rm = TRUE)) %>%
+  ggplot(aes(x=(year),y=Count_mean,color=Species)) + geom_point() +
+  geom_smooth(se=FALSE) +
+  theme_pubr() + ylab("Moth yearly sum catch")
+
+layout <- "
+AB
+C#
+"
+
+catch_mean_year + catch_median_year + catch_sum_year + plot_layout(guides = 'collect',design = layout)
+
+
+catch_mean_adj <- Myron_data %>%
+  pivot_longer(cols=(starts_with("H_")),names_to = "Species",values_to = "count") %>%
+  group_by(woy,Species) %>%
+  summarize(Count_mean = mean(count,na.rm = TRUE)) %>%
+  ggplot(aes(x=(((woy + 24) %% 52)),y=Count_mean,color=Species)) + geom_point() +
+  geom_smooth(se=FALSE,method = "gam", 
+              formula = y ~ s(x, bs = "cc", k = 20)) +
+  theme_pubr() + ylab("Moth yearly mean catch") +
+  scale_color_manual(values=c("#1c4c5e", "#5ba9b8"))
+
+
+catch_median_adj <- Myron_data %>%
+  pivot_longer(cols=(starts_with("H_")),names_to = "Species",values_to = "count") %>%
+  group_by(woy,Species) %>%
+  summarize(Count_mean = median(count,na.rm = TRUE)) %>%
+  ggplot(aes(x=(((woy + 24) %% 52)),y=Count_mean,color=Species)) + geom_point() +
+  geom_smooth(se=FALSE,method="gam", 
+              formula = y ~ s(x, bs = "cc", fx = TRUE, k = 20)) +
+  theme_pubr() + ylab("Moth yearly median catch")  +
+  scale_color_manual(values=c("#1c4c5e", "#5ba9b8"))
+
+catch_sum_adj <- Myron_data %>%
+  pivot_longer(cols=(starts_with("H_")),names_to = "Species",values_to = "count") %>%
+  group_by(woy,Species) %>%
+  summarize(Count_mean = sum(count,na.rm = TRUE)) %>%
+  ggplot(aes(x=(((woy + 24) %% 52)),y=Count_mean,color=Species)) + geom_point() +
+  geom_smooth(se=FALSE,method="gam", 
+              formula = y ~ s(x, bs = "cc", fx = TRUE, k = 20)) +
+  theme_pubr() + ylab("Moth yearly sum catch")  +
+  scale_color_manual(values=c("#1c4c5e", "#5ba9b8"))
+
+
+catch_mean <- Myron_data %>%
+  pivot_longer(cols=(starts_with("H_")),names_to = "Species",values_to = "count") %>%
+  group_by(woy,Species) %>%
+  summarize(Count_mean = mean(count,na.rm = TRUE)) %>%
+  ggplot(aes(x=(((woy + 24) %% 52)),y=Count_mean,color=Species)) + geom_point() +
+  geom_smooth(se=FALSE,method = "gam", 
+              formula = y ~ s(x, bs = "cc", k = 20)) +
+  theme_pubr() + ylab("Moth yearly mean catch")  +
+  scale_color_manual(values=c("#1c4c5e", "#5ba9b8"))
+
+
+catch_median <- Myron_data %>%
+  pivot_longer(cols=(starts_with("H_")),names_to = "Species",values_to = "count") %>%
+  group_by(woy,Species) %>%
+  summarize(Count_mean = median(count,na.rm = TRUE)) %>%
+  ggplot(aes(x=woy,y=Count_mean,color=Species)) + geom_point() +
+  geom_smooth(se=FALSE,method="gam", 
+              formula = y ~ s(x, bs = "cc", fx = TRUE, k = 20)) +
+  theme_pubr() + ylab("Moth yearly median catch") +
+  scale_color_manual(values=c("#1c4c5e", "#5ba9b8"))
+ 
+catch_sum <- Myron_data %>%
+  pivot_longer(cols=(starts_with("H_")),names_to = "Species",values_to = "count") %>%
+  group_by(woy,Species) %>%
+  summarize(Count_mean = sum(count,na.rm = TRUE)) %>%
+  ggplot(aes(x=woy,y=Count_mean,color=Species)) + geom_point() +
+  geom_smooth(se=FALSE,method="gam", 
+              formula = y ~ s(x, bs = "cc", fx = TRUE, k = 20)) +
+  theme_pubr() + ylab("Moth yearly sum catch") +
+  scale_color_manual(values=c("#1c4c5e", "#5ba9b8"))
+
+layout <- "
+ABC
+DEF
+"
+
+catch_mean_adj + catch_median_adj + catch_sum_adj + catch_mean + catch_median + catch_sum + plot_layout(guides = 'collect',design = layout)
 
 
 #Baker Data
@@ -67,12 +167,66 @@ ridgelines
 
 Baker_data %>%
   group_by(Species) %>%
+  summarize(mean=mean(mean_count,na.rm=TRUE), median = median(mean_count,na.rm=TRUE))
+
+Histogram_punc <- Baker_data %>% 
+  filter(Species == "punc") %>%
+  select(mean_count,Species) %>%
+  ggplot(aes(x=mean_count)) + geom_histogram() +
+  geom_vline(xintercept = 14.9,linetype=2,color="red") +
+  geom_vline(xintercept = 8.59,linetype=2,color="orange") +
+  theme_pubr() + ggtitle("Helicoverpa punctigera")
+
+Histogram_arm <- Baker_data %>% 
+  filter(Species == "arm") %>%
+  select(mean_count,Species) %>%
+  ggplot(aes(x=mean_count)) + geom_histogram() +
+  geom_vline(xintercept = 18.9,linetype=2,color="red") +
+  geom_vline(xintercept = 1,linetype=2,color="orange") +
+  theme_pubr() + ggtitle("Helicoverpa armigera")
+
+Histogram_punc + Histogram_arm + plot_annotation(
+  title = 'Count distribution for both species',
+  subtitle = 'Red line is the mean while orange line is the median'
+)
+
+Baker_data %>%
+  group_by(Species) %>%
   summarize(Date_min = min(Date,na.rm = TRUE),Date_mean = mean(Date,na.rm = TRUE),Date_max = max(Date,na.rm = TRUE), year_range = as.numeric(difftime(Date_max,Date_min,units="auto")/365),
             Count_min = min(mean_count,na.rm = TRUE), Count_mean = mean(mean_count,na.rm = TRUE),Count_max = max(mean_count,na.rm = TRUE))
 
-Baker_data %>%
+
+
+
+
+catch_mean <- Baker_data %>%
   group_by(before,Species) %>%
   summarize(Count_min = min(mean_count,na.rm = TRUE), Count_mean = mean(mean_count,na.rm = TRUE),Count_max = max(mean_count,na.rm = TRUE)) %>%
   ggplot(aes(x=(before),y=Count_mean,color=Species)) + geom_point() +
-  geom_line() +
-  theme_pubr()
+  geom_smooth(se=FALSE) +
+  theme_pubr() + ylab("Moth yearly mean catch")
+
+
+catch_median <- Baker_data %>%
+  group_by(before,Species) %>%
+  summarize(Count_min = min(mean_count,na.rm = TRUE), Count_mean = median(mean_count,na.rm = TRUE),Count_max = max(mean_count,na.rm = TRUE)) %>%
+  ggplot(aes(x=(before),y=Count_mean,color=Species)) + geom_point() +
+  geom_smooth(se=FALSE) +
+  theme_pubr() + ylab("Moth yearly median catch")
+
+catch_sum <- Baker_data %>%
+  group_by(before,Species) %>%
+  summarize(Count_min = min(mean_count,na.rm = TRUE), Count_mean = sum(mean_count,na.rm = TRUE),Count_max = max(mean_count,na.rm = TRUE)) %>%
+  ggplot(aes(x=(before),y=Count_mean,color=Species)) + geom_point() +
+  geom_smooth(se=FALSE) +
+  theme_pubr() + ylab("Moth yearly sum catch")
+
+layout <- "
+AB
+C#
+"
+
+catch_mean + catch_median + catch_sum + plot_layout(guides = 'collect',design = layout)
+
+
+

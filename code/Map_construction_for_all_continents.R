@@ -134,7 +134,7 @@ states <- state.name
 US_out <- ne_countries(country="United States of America") %>% st_as_sf() %>% select(geometry)
 CA_out <- ne_countries(country="Canada") %>%  st_as_sf() %>% select(geometry)
 NA_outline <- rbind(US_out, CA_out)
-plot(NA_outline)
+
 
 US_out <- ne_states(country="United States of America") %>% st_as_sf() %>% 
   filter(name %in% state.name) %>% filter(name != "Hawaii") %>% select(geometry)
@@ -154,12 +154,12 @@ yearly_filter <- st_intersection(US_yearly,NA_map)
 weekly_filter <- st_intersection(US_weekly,NA_map)
 
 
-p1 <- ggplot(data=test_map) + 
+p1 <- ggplot(data=NA_map) + 
   geom_sf(aes(geometry=geometry)) + 
   geom_sf(data=yearly_filter,aes(geometry=geometry),size=0.65) +
   theme_void() +
-  #scale_x_continuous(limits=c(-123,-62),breaks = c(-120,-95,-70)) +
-  #scale_y_continuous(limits=c(25,50),breaks = c(30,40,50)) +
+  scale_x_continuous(limits=c(-123,-62),breaks = c(-120,-95,-70)) +
+  scale_y_continuous(limits=c(25,50),breaks = c(30,40,50)) +
   theme(panel.background = element_rect(fill = '#9ac6d7')) + ylab("Latitude") + xlab("Longitude")
 
 p1
@@ -218,5 +218,5 @@ ggsave('p1.png', plot=p1, width = plot_ratio*5, height=5,dpi=600)
 
 anim_save("output/maps/yearly_US_Helio_catches.gif",yearly_plot, height = 613.33, width=1150)
 anim_save("output/maps/weekly_US_Helio_catches.gif",weekly_plot, height = 613.33, width=1150)
-ggsave(p1,file="output/maps/Australia_trap_locations.png",dpi=600,width = 10,height=10,units="in")
+ggsave(p1,file="output/maps/US_trap_locations.png",dpi=600,width = 15,height=7.9999,units="in")
 
