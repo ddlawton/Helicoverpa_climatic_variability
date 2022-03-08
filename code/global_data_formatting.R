@@ -32,12 +32,12 @@ m_cleaned<- myron_dat %>%
   drop_na(count) %>%
   select(dataset,Latitude,Longitude,Week,Year,Species,count,Trap)
   
-AUS_dat <- rbind(b_cleaned,m_cleaned) 
+AUS_dat <- rbind(b_cleaned,m_cleaned) %>% mutate(continent = "Australia")
 
 US_dat2 <- us_dat %>%
   select(woy,year,CEW_sum,location,longitude,latitude)%>%
   rename(Week = woy, Year = year,count = CEW_sum, Trap = location,Latitude=latitude,Longitude=longitude) %>%
-  mutate(Species = "H_zea", dataset="US")
+  mutate(Species = "H_zea", dataset="US")  %>% mutate(continent = "North_America")
 
 dat <- rbind(AUS_dat,US_dat2) %>% mutate(
   Species = case_when(
@@ -65,9 +65,12 @@ ggplot(data=world) +
 
 yearly_dat <- dat %>%
   group_by(Year,Trap,Species) %>%
-  summarize(`mean count` = mean(count),median_count = median(count),se_count = se(count),Latitude = first(Latitude),Longitude = first(Longitude)) %>%
+  summarize(`mean count` = mean(count),median_count = median(count),se_count = se(count),Latitude = first(Latitude),Longitude = first(Longitude), continent = first(continent)) %>%
   group_by(Year) %>%
   mutate(`Number of yearly traps` = length(unique(Trap)))
+
+
+csummary(yearly_dat)
 
 yearly_dat %>%
   mutate(Species = factor(Species)) %>%
@@ -91,5 +94,30 @@ dat %>%
   facet_wrap(~name,scales = "free") +
   ggpubr::theme_pubr()
 
-write.csv(yearly_dat,"data/processed/global_helicoverpa_data.csv", row.names=FALSE)
 
+
+
+Heli.pnts = SpatialPointsDataFrame(yearly_dat[,c("Longitude","Latitude")], yearly_dat) %>% st_as_sf()
+plot(Heli.pnts)
+
+dat_sf <- yearly_dat %>%
+  st_as_sf(.,coords=c("Longitude","Latitude"),crs=4326)
+
+
+dat_sf2 <- dat_sf %>%
+  mutate(before_year = Year - 1,
+        time_end = paste0(Year,"-09-","30"),
+         time_start  = paste0(before_year,"-02-","01")) %>%
+  filter(before_year >= 1981) %>%
+  select(!before_year) 
+summary(dat_sf2)
+
+
+st_write(dat_sf2, "data/processed/ugly_shapefile/Heliocoverpa_data.shp")
+
+
+write.csv(yearly_dat,"data/processed/US_helicoverpa_data.csv", row.names=FALSE)
+
+yearly_dat2 <- (yearly_dat %>% filter(continent != "Australia"))
+summary()
+write.csv(yearly_dat2,"data/processed/US_helicoverpa_data.csv", row.names=FALSE)
