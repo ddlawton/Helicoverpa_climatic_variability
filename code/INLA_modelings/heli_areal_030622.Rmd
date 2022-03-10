@@ -43,11 +43,16 @@ suppressMessages(library(dplyr))
 suppressMessages(library(sp))
 suppressMessages(library(pals))
 suppressMessages(library(viridis)) #only new package from mesh code
+suppressMessages(library(devtools))
+#install_github('timcdlucas/INLAutils')
+suppressMessages(library(INLAutils))
+suppressMessages(library(splines))
+
 ```
 
 # Observations  
 ```{r}
-Heli.df = read.csv("data/processed/global_helicoverpa_data.csv", 
+Heli.df = read.csv("data/processed/US_seasonal_climate.csv", 
                   header = TRUE, sep=",")
 
 dim(Heli.df)
@@ -59,9 +64,9 @@ unique(Heli.df$Species)
 range(Heli.df$Latitude)
 range(Heli.df$Longitude)
 
-range(Heli.df$Number.of.yearly.traps) #sampling effort
+range(Heli.df$Num_traps) #sampling effort
 
-range(Heli.df$mean.count)
+range(Heli.df$mean_count)
 length(which(is.na(Heli.df$se_count)))
 length(which(is.na(Heli.df))) #all missing/NA values are in se_count
 ```
@@ -166,6 +171,7 @@ dim(Heli.pnts)[1] #Total points
 #Filter observations to US only
 Heli.pnts$Region = over(Heli.pnts, hex_grid)[,"Region"] #Extract corresponding hexagon region
 Heli.pnts = subset(Heli.pnts, is.na(Region) == FALSE) # filter to only moths in US
+
 range(Heli.pnts$Region) #Region IDs
 
 dim(Heli.pnts)[1] #US only points
@@ -182,9 +188,15 @@ Count number of observations and traps in each region by year.
 Region.counts = as.data.frame(
                       Heli.pnts@data %>%
                         group_by(Year, Region) %>%
-                        summarise(Moths = sum(mean.count),
-                                  Traps = sum(Number.of.yearly.traps)))
+                        summarise(Moths = sum(mean_count),
+                                  num_traps = length(unique(Trap)),
+                                  Air_temp = first(Air_temp_mean),
+                                  Precip = first(Precip_mean)))
+
+
+
 head(Region.counts)
+summary(Region.counts)
 ```
 
 ## Map Results
@@ -204,6 +216,7 @@ head(hex_grid.plot)
 hex_grid.plot@data$id = rownames(hex_grid.plot@data)
 hex_df = fortify(hex_grid.plot, region = "id")
 hex_df = left_join(hex_df, hex_grid.plot@data, by = "id")
+
 
 ggplot(hex_df, 
         aes(long,lat, group=group, fill = Moths)) + 
@@ -237,7 +250,7 @@ ggplot(hex_df,
 
 
 ggplot(hex_df, 
-        aes(long,lat, group=group, fill = Traps)) + 
+        aes(long,lat, group=group, fill = num_traps)) + 
         scale_fill_viridis(name="Trap Counts 2010", 
                            discrete=F, option = "viridis",
                            direction = -1, na.value = "white") +
@@ -290,7 +303,7 @@ for(i in 1:length(Year.levels)){ #For each year i...
        
 head(Model.hex) 
 Model.hex$Moths[is.na(Model.hex$Moths)] = 0 #set cells without moths to 0
-Model.hex$Traps[is.na(Model.hex$Traps)] = 0 #same for traps
+Model.hex$Traps[is.na(Model.hex$num_traps)] = 0 #same for traps
 
 dim(Model.hex)
 apply(Model.hex,2,range) #range of values
@@ -304,14 +317,15 @@ nb = poly2nb(hex_grid,  #identify neighbors from spatial polygons
              queen = TRUE) #consider all directions around cells
 
 nb2INLA("J", nb) #format for modeling
-J = inla.read.graph("J") #coverting to a matrix
+J = INLA::inla.read.graph("J") #coverting to a matrix
 
 
 summary(nb) # the header info is what is important: 995 cells, 5606 neighbors, an average of 5.6 neighbors per hexagon
 ```
      
-View Neighborhood graph
+## View Neighborhood graph
 Graph identifies bordering cells.  Hexagons in background, centroids as points, and lines show cells that are neighbors.  
+
 ```{r fig.width=11, fig.height=11}
 plot(hex_grid, col='gray95', border='gray50')
 xy = coordinates(hex_grid)
@@ -343,25 +357,39 @@ Model.hex$ID.Region.Yr = as.integer(as.factor(Model.hex$Region.Yr)) #convert the
 range(Model.hex$ID.Region.Yr) #number of Region*Year combinations
 ```
 
-### Fake Predictor
-Creating a fake "temperature" variable as an example.
+### Vizualizing the climatic variables. 
+Just temperature and precipitation for now.
 ```{r}
-Model.hex$Temperature = rnorm(dim(Model.hex)[1])
-range(Model.hex$Temperature)
+summary(Model.hex)
+range(Model.hex$Air_temp,na.rm=TRUE)
+range(Model.hex$Precip,na.rm=TRUE)
+
+ggplot(Model.hex,aes(x=Air_temp)) + geom_histogram() + ggpubr::theme_pubr()
+
+ggplot(Model.hex,aes(x=Precip)) + geom_histogram() + ggpubr::theme_pubr()
+
+ggplot(Model.hex,aes(x=Moths)) + geom_histogram() + ggpubr::theme_pubr()
+
+
 ```
 
 ### Organize Data as List Object  
 This is same as with the mesh approach, just organizing everything as a list() instead of a dataframe.  
 ```{r}
+Model.hex$range.grp <- inla.group(Model.hex$Air_temp, n = 20, method = "quantile")
+
+
 My.lst =  list(list(intercept1 = rep(1, dim(Model.hex)[1])), #Repeat value of 1 for each data point
-          list(Temperature = Model.hex[,"Temperature"], #Fake "fixed" effect
-               Effort = Model.hex[,"Traps"], # number of traps in hexagon, "Effort"
+          list(Air_temp = Model.hex[,"Air_temp"], # Seasonal average temperature
+               Precip = Model.hex[,"Precip"], #Fake "fixed" effect
+               Effort = Model.hex[,"num_traps"], # number of traps in hexagon, "Effort"
                Year1 = Model.hex[,"Year.int"], #Copy of Year index
                Year2 = Model.hex[,"Year.int"], #Extra copy of Year index, depending on how model is setup, sometimes need extra copied
                Year3 = Model.hex[,"Year.int"], #Extra copy of Year index
                Region1 = Model.hex[,"Region"], #Region/Hexagon identifier
                Region2 = Model.hex[,"Region"], #Extra copy of Region/Hexagon identifier
                Region3 = Model.hex[,"Region"], #Extra copy of Region/Hexagon identifier
+               range.grp = Model.hex[,"range.grp"],
                ID.Region.Yr1  = Model.hex[,"ID.Region.Yr"])) #Region*Year combinations, "interaction"
 
 
@@ -375,11 +403,20 @@ length(which(Model.hex$Moths > Q.cut)) #number of regions with more than the cut
 Model.hex$Moths.cut = ifelse(Model.hex$Moths >= Q.cut, Q.cut, Model.hex$Moths) #making Q.cut the maximum count, again just for code example
 
 Model.hex$Moths.cut = round(Model.hex$Moths.cut, 0) #rounding to use poisson for demo
+Model.hex$Moths2 = round(Model.hex$Moths, 0)
+
+ggplot(Model.hex,aes(x=Moths,y=Moths.cut)) + geom_point()
 
 
-range(Model.hex$Moths.cut) #Updated range
+summary(Model.hex$Moths) #Updated range
 
-Stack.1 = inla.stack(data = list(Y = Model.hex$Moths.cut),  #Response variable, Moth Counts w/ added cut point
+Stack.1 = inla.stack(data = list(Y = Model.hex$Moths2),  #Response variable, Moth Counts w/ added cut point
+                                 A = list(1,1), # nothing here, just a placeholder for a possible matrix
+                           effects = My.lst ,   #all predictors and space time indices above  
+                               tag = "area.0")  #arbitrary label/name
+
+
+Stack.2 = inla.stack(data = list(Y = Model.hex$Moths2),  #Response variable, Moth Counts w/ added cut point
                                  A = list(1,1), # nothing here, just a placeholder for a possible matrix
                            effects = My.lst ,   #all predictors and space time indices above  
                                tag = "area.0")  #arbitrary label/name
@@ -407,45 +444,254 @@ Frm.0 = Y ~ -1 + intercept1 +      #Y is response variable, -1 tells software we
                         f(ID.Region.Yr1,  #interaction effect
                           model="iid",  #each combination may vary
                           constr=TRUE) +
-                       Effort + Temperature #Fixed effects
+                       Effort 
+
+
+inla.stack.data(Stack.2) <- inla.group(lidar$range, n = 20, method = "quantile")
+
+
+Frm.1 = Y ~ -1 + intercept1 +      #Y is response variable, -1 tells software we're using a custom intercept1
+                       f(Region1,  #Index of Region IDs
+                         model="bym2", #specifying we want a BYM (Besag Mollie York) model
+                         graph=J,      #J is the matrix that identfies neighboring hexagons
+                         constr=TRUE,  #center/scale the random spatial effect to zero
+                         hyper=list(phi = list(prior = "pc",     #priors that inform the spatial effect, we can dive into these later.
+                                               param = c(0.5, 2/3), 
+                                               initial = 3), 
+                                    prec = list(prior = "pc.prec", 
+                                                param = c(1, 0.01), 
+                                                initial = 1.5))) +
+                        f(Year1,     #Year index
+                          model="rw2", # model as a random walk, smooth trend
+                          constr=TRUE) + #center on zero
+                        f(ID.Region.Yr1,  #interaction effect
+                          model="iid",  #each combination may vary
+                          constr=TRUE) +
+                        f(range.grp,     #Year index
+                          model="rw2", # model as a random walk, smooth trend
+                          constr=TRUE)
+
+Frm.2 = Y ~ -1 + intercept1 +      #Y is response variable, -1 tells software we're using a custom intercept1
+                       f(Region1,  #Index of Region IDs
+                         model="bym2", #specifying we want a BYM (Besag Mollie York) model
+                         graph=J,      #J is the matrix that identfies neighboring hexagons
+                         constr=TRUE,  #center/scale the random spatial effect to zero
+                         hyper=list(phi = list(prior = "pc",     #priors that inform the spatial effect, we can dive into these later.
+                                               param = c(0.5, 2/3), 
+                                               initial = 3), 
+                                    prec = list(prior = "pc.prec", 
+                                                param = c(1, 0.01), 
+                                                initial = 1.5))) +
+                        f(Year1,     #Year index
+                          model="rw2", # model as a random walk, smooth trend
+                          constr=TRUE) + #center on zero
+                        f(ID.Region.Yr1,  #interaction effect
+                          model="iid",  #each combination may vary
+                          constr=TRUE) +
+                        ns(Air_temp,     #Year index
+                          df=20)
+
+Frm.3 = Y ~ -1 + intercept1 +      #Y is response variable, -1 tells software we're using a custom intercept1
+                       f(Region1,  #Index of Region IDs
+                         model="bym2", #specifying we want a BYM (Besag Mollie York) model
+                         graph=J,      #J is the matrix that identfies neighboring hexagons
+                         constr=TRUE,  #center/scale the random spatial effect to zero
+                         hyper=list(phi = list(prior = "pc",     #priors that inform the spatial effect, we can dive into these later.
+                                               param = c(0.5, 2/3), 
+                                               initial = 3), 
+                                    prec = list(prior = "pc.prec", 
+                                                param = c(1, 0.01), 
+                                                initial = 1.5))) +
+                        f(Year1,     #Year index
+                          model="rw2", # model as a random walk, smooth trend
+                          constr=TRUE) + #center on zero
+                        f(ID.Region.Yr1,  #interaction effect
+                          model="iid",  #each combination may vary
+                          constr=TRUE) +
+                        Air_temp
+
+
+knots <- seq(10, 30, by = 1)
+
+Frm.4 = Y ~ -1 + intercept1 +      #Y is response variable, -1 tells software we're using a custom intercept1
+                       f(Region1,  #Index of Region IDs
+                         model="bym2", #specifying we want a BYM (Besag Mollie York) model
+                         graph=J,      #J is the matrix that identfies neighboring hexagons
+                         constr=TRUE,  #center/scale the random spatial effect to zero
+                         hyper=list(phi = list(prior = "pc",     #priors that inform the spatial effect, we can dive into these later.
+                                               param = c(0.5, 2/3), 
+                                               initial = 3), 
+                                    prec = list(prior = "pc.prec", 
+                                                param = c(1, 0.01), 
+                                                initial = 1.5))) +
+                        f(Year1,     #Year index
+                          model="rw2", # model as a random walk, smooth trend
+                          constr=TRUE) + #center on zero
+                        f(ID.Region.Yr1,  #interaction effect
+                          model="iid",  #each combination may vary
+                          constr=TRUE) +
+                        bs(Air_temp, knots = knots)
+
                  
 
 #theta1 = Model.0$internal.summary.hyperpar$mean
-theta1 = c(-3.8205006, 3.0879798, 0.6057112, -2.4115143) #mean parameters from first run
+#theta1 = c(-3.8205006, 3.0879798, 0.6057112, -2.4115143) #mean parameters from first run
 
+
+```
+
+
+```{r}
 Model.0 = inla(Frm.0, #formula above
-      				 data = inla.stack.data(Stack.1), #data to use
+      				 data = inla.stack.data(Stack.2), #data to use
       				 family = "poisson", #family
       				 verbose = TRUE, #print results to screen while running
       				 control.predictor = list( 
       											 A = inla.stack.A(Stack.1), #data again
       									 compute = TRUE, #estimate Fitted values using link function
       										  link = 1),  #use default link function, log-link for poisson 
-      				 control.mode = list(restart = TRUE, theta = theta1), #parameter estimates to speed things up 
+      				 #control.mode = list(restart = TRUE, theta = theta1), #parameter estimates to speed things up 
       				 control.inla = list(strategy="gaussian", #speeds up run
       											   int.strategy = "eb"),
       				 control.compute=list(dic = TRUE, cpo = TRUE, waic = TRUE)) #calculate model comparison metrics
+```
+
+```{r}
+Model.1 = inla(Frm.1, #formula above
+      				 data = inla.stack.data(Stack.2), #data to use
+      				 family = "poisson", #family
+      				 verbose = TRUE, #print results to screen while running
+      				 control.predictor = list( 
+      											 A = inla.stack.A(Stack.1), #data again
+      									 compute = TRUE, #estimate Fitted values using link function
+      										  link = 1),  #use default link function, log-link for poisson 
+      				 #control.mode = list(restart = TRUE, theta = theta1), #parameter estimates to speed things up 
+      				 control.inla = list(strategy="gaussian", #speeds up run
+      											   int.strategy = "eb"),
+      				 control.compute=list(dic = TRUE, cpo = TRUE, waic = TRUE)) #calculate model comparison metrics
+```
+
+
+```{r}
+Model.2 = inla(Frm.2, #formula above
+      				 data = inla.stack.data(Stack.2), #data to use
+      				 family = "poisson", #family
+      				 verbose = TRUE, #print results to screen while running
+      				 control.predictor = list( 
+      											 A = inla.stack.A(Stack.1), #data again
+      									 compute = TRUE, #estimate Fitted values using link function
+      										  link = 1),  #use default link function, log-link for poisson 
+      				 #control.mode = list(restart = TRUE, theta = theta1), #parameter estimates to speed things up 
+      				 control.inla = list(strategy="gaussian", #speeds up run
+      											   int.strategy = "eb"),
+      				 control.compute=list(dic = TRUE, cpo = TRUE, waic = TRUE)) #calculate model comparison metrics
+```
+
+
+```{r}
+Model.3 = inla(Frm.3, #formula above
+      				 data = inla.stack.data(Stack.2), #data to use
+      				 family = "poisson", #family
+      				 verbose = TRUE, #print results to screen while running
+      				 control.predictor = list( 
+      											 A = inla.stack.A(Stack.1), #data again
+      									 compute = TRUE, #estimate Fitted values using link function
+      										  link = 1),  #use default link function, log-link for poisson 
+      				 #control.mode = list(restart = TRUE, theta = theta1), #parameter estimates to speed things up 
+      				 control.inla = list(strategy="gaussian", #speeds up run
+      											   int.strategy = "eb"),
+      				 control.compute=list(dic = TRUE, cpo = TRUE, waic = TRUE)) #calculate model comparison metrics
+```
+
+```{r}
+Model.4 = inla(Frm.4, #formula above
+      				 data = inla.stack.data(Stack.2), #data to use
+      				 family = "poisson", #family
+      				 verbose = TRUE, #print results to screen while running
+      				 control.predictor = list( 
+      											 A = inla.stack.A(Stack.1), #data again
+      									 compute = TRUE, #estimate Fitted values using link function
+      										  link = 1),  #use default link function, log-link for poisson 
+      				 #control.mode = list(restart = TRUE, theta = theta1), #parameter estimates to speed things up 
+      				 control.inla = list(strategy="gaussian", #speeds up run
+      											   int.strategy = "eb"),
+      				 control.compute=list(dic = TRUE, cpo = TRUE, waic = TRUE)) #calculate model comparison metrics
+```
+
+
+```{r}
+Model.0$dic$dic
+Model.1$dic$dic
+Model.2$dic$dic
+Model.3$dic$dic
+Model.4$dic$dic
+
+
+Model.0$waic$waic
+Model.1$waic$waic
+Model.2$waic$waic
+Model.3$waic$waic
+Model.4$waic$waic
 
 ```
 
+
 Results summary
 ```{r}
-summary(Model.0) #mean result values, specific values are plotted below 
+sum_mod0 <- summary(Model.0) #mean result values, specific values are plotted below 
+sum_mod01 <- summary(Model.1) #mean result values, specific values are plotted below 
+
+sum_mod0$
+sum_mod01$dic
+
+library(INL)
+INLAdispersion_check(Model.1, nsim = 1000)
+
 ```
 
 ## Check Fitted Values
 ```{r  fig.width=11, fig.height=8}
 #Pull fitted values
 idat = inla.stack.index(Stack.1, "area.0")$data    #Create an index corresponding to input data, "area.0" is the arbitrary name in the input data (Stack.1)
+
+idat2 = inla.stack.index(Stack.2, "area.0")$data    #Create an index corresponding to input data, "area.0" is the arbitrary name in the input 
 Model.hex$Fitted = Model.0$summary.fitted.values$mean[idat]  #Get mean fitted values from model
+Model.hex$Fitted2 = Model.1$summary.fitted.values$mean[idat2]  #Get mean fitted values from model
 
 
 plot.fitted = Model.hex %>% filter(Moths > 0) # remove all the extra zeros to compare fitted against observed moths
-cor(plot.fitted$Moths.cut, plot.fitted$Fitted) #rounder version with maximum cutoff
+cor(plot.fitted$Moths2, plot.fitted$Fitted) #rounder version with maximum cutoff
 cor(plot.fitted$Moths, plot.fitted$Fitted) #original values before rounding, cutoff, etc..
 
 
-ggplot(plot.fitted, aes(Moths.cut, Fitted)) +
+ggplot(plot.fitted, aes(Moths2, Fitted)) +
+         geom_jitter(shape = 1, size = 3, col = "gray70") +
+         geom_abline(slope = 1, intercept = 0, alpha = 0.5, size = 1, col="red") +
+         xlab("Observed Moth Counts") +
+            ylab("Fitted Moth Estimates") +  
+            theme_classic() +
+            scale_y_continuous(breaks = seq(0, 220, 20), limits = c(0,220)) +
+            scale_x_continuous(breaks = seq(0, 220, 20), limits = c(0,220)) +
+            theme( panel.background = element_blank(),
+                  plot.background = element_blank(),
+                  panel.border = element_blank(),
+                  legend.direction = "horizontal",
+                  legend.position="bottom",
+                  strip.text = element_text(size=16, face="bold"),
+                  strip.background = element_blank(),
+                  legend.key.size = unit(1,"line"),
+                  legend.key.width = unit(3,"line"),
+                  legend.text = element_text(size=12, face="bold"),
+                  legend.title = element_text(size=16, face="bold"),
+                  axis.title.x = element_text(face="bold", size = 24),
+                  axis.title.y =element_text(face="bold", size = 24),
+                  axis.text.x = element_text(face="bold", size=24, vjust=0.5, 
+                                             hjust=0.5, angle=0),
+                  axis.text.y = element_text(face="bold", size=24, vjust=0.5, 
+                                             hjust=1, angle=0),
+                  plot.title = element_text(size=22, face="bold"))
+
+ggplot(plot.fitted, aes(Moths.cut, Fitted2)) +
          geom_jitter(shape = 1, size = 3, col = "gray70") +
          geom_abline(slope = 1, intercept = 0, alpha = 0.5, size = 1, col="red") +
          xlab("Observed Moth Counts") +
@@ -499,8 +745,8 @@ ggplot(hex_df,
         scale_fill_gradient2("Random Spatial Field",
                              low = "blue", mid = "white", high ="red", 
                              midpoint = 0, space = "rgb", guide = "colourbar",
-                             breaks = seq(-4, 12, 4),
-                             limits = c(-4, 12.2)) +
+                             breaks = seq(-6, 4, 2),
+                             limits = c(-6, 4)) +
        geom_polygon(col="black", size = 0.1) + 
         xlab(" ") +
         ylab(" ") +
@@ -576,3 +822,142 @@ ggplot(trend.df, aes(Year, Mean)) +
                                          hjust=0.5, angle=0),
               axis.title.x = element_text(face="bold", size = 26))
 ```
+
+#Air Temp trend
+
+```{r  fig.width=11, fig.height=8}
+trend.df = Model.0$summary.random$range.grp[,c(1,2,4,6)]   #pull estimates from model
+names(trend.df) = c("Index", "Mean", "Q2.5", "Q97.5")  #rename
+
+trend.df$Year = 10:30 #Years
+
+myspan = 0.5 #smoothness for ggplot
+ggplot(trend.df, aes(Index, Mean)) +
+        geom_hline(yintercept = 0, 
+                   linetype = "solid",
+                   col = "darkgray",
+                   size = 0.5) +
+        geom_smooth(col = "black", 
+                  method = "loess",
+                  se = FALSE,
+                  lwd = 1) +
+        geom_smooth(data = trend.df, aes(Index, Q2.5), 
+                    col = "grey40", 
+                    method = "loess",
+                    se = FALSE,
+                    linetype= "dashed",
+                    size=0.1) +
+        geom_smooth(data = trend.df, aes(Index, Q97.5), 
+                    col = "grey40", 
+                    method = "loess",
+                    se = FALSE,
+                    linetype= "dashed",
+                    size=0.1) +
+        xlab(" ") +
+        ylab("Temporal Trend (log)") +  
+        theme_classic() +
+        theme(axis.text=element_text(size=16),
+              panel.background = element_blank(),
+              plot.background = element_blank(),
+              panel.border = element_blank(),
+              legend.position = "none",
+              strip.background = element_blank(),
+              strip.text = element_text(face="bold", size = 22),
+              axis.title.y = element_text(face="bold", size = 24),
+              axis.text.x = element_text(face="bold", size=18, vjust=0.5, 
+                                         hjust=0.5, angle=0),
+              axis.title.x = element_text(face="bold", size = 26))
+```
+
+```{r}
+
+p <- autoplot(Model.0)
+plot(p)
+
+p2 <- autoplot(Model.1)
+plot(p2)
+
+Model.1$summary.fitted.values$
+
+
+library(inlabru)  
+plot_dat <- predict(Model.1,Model.hex)
+
+
+
+mean <- Model.2$summary.fitted.values$mean[idat2]
+quant0.025 <- Model.2$summary.fitted.values$`0.025quant`[idat2]
+quant0.975 <- Model.2$summary.fitted.values$`0.975quant`[idat2]
+  
+  
+Model.hex2 <- Model.hex %>% cbind(mean,quant0.025,quant0.975) 
+
+
+Model.1$summary.fitted.values[,c(1,3,5)] %>% as_tibble()
+
+
+
+
+
+
+ggplot(Model.hex2, aes(x=Air_temp, y=mean)) +
+        geom_smooth(col = "black", 
+                  method = "loess",
+                  se = FALSE,
+                  lwd = 1) +
+        geom_smooth(data = Model.hex2, aes(Air_temp, quant0.025), 
+                    col = "grey40", 
+                    method = "loess",
+                    se = FALSE,
+                    linetype= "dashed",
+                    size=0.1) +
+        geom_smooth(data = Model.hex2, aes(Air_temp, quant0.975), 
+                    col = "grey40", 
+                    method = "loess",
+                    se = FALSE,
+                    linetype= "dashed",
+                    size=0.1) +
+        geom_rug(sides="b") +
+        xlab("Air Temperature (c)") +
+        ylab("Predicted yearly month count per region") +  
+        theme_classic() +
+        coord_cartesian(ylim=c(0,300)) +
+        theme(axis.text=element_text(size=16),
+              panel.background = element_blank(),
+              plot.background = element_blank(),
+              panel.border = element_blank(),
+              legend.position = "none",
+              strip.background = element_blank(),
+              strip.text = element_text(face="bold", size = 22),
+              axis.title.y = element_text(face="bold", size = 24),
+              axis.text.x = element_text(face="bold", size=18, vjust=0.5, 
+                                         hjust=0.5, angle=0),
+              axis.title.x = element_text(face="bold", size = 26))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ggplot(plot_dat,aes(y=Fitted2,x=Air_temp)) + 
+  geom_smooth(method="loess") + 
+  ggpubr::theme_pubr() + 
+  #geom_point()
+  geom_rug(sides="b") + 
+  coord_cartesian(ylim=c(0,100))
+
+
+ggplot(Model.hex,aes(y=Fitted2,x=Precip)) + geom_smooth(method="loess") + ggpubr::theme_pubr() + geom_rug(sides="b") + coord_cartesian(ylim=c(0,300))
+
+
+```
+
