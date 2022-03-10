@@ -4,7 +4,7 @@
 ######
 
 rm(list=ls())
-
+library(rlang)
 library(tidyverse)
 library(mgcv)
 library(splitstackshape)
@@ -40,16 +40,16 @@ dat3 <- dat2 %>%
          Air_temp = Air_temp - 273.15,
          soil_temp_1 = soil_temp_1 - 273.15,
          soil_temp_2 = soil_temp_2 - 273.15) %>%
-  filter(contnnt != "Australia") %>%
+  #filter(contnnt == "Australia") %>%
   group_by(rowid) %>%
   filter(Year == climate_year, climate_month %in% 2:9) %>%
   group_by(Trap,Year) %>%
   summarize(rowid = first(rowid),Air_temp_mean = mean(Air_temp),Num_traps = first(Nmbroyt),Precip_mean = mean(Precip),continent = first(contnnt),
             mean_count = first(mdn_cnt),se_count = first(se_cont),soil_moisture1 = mean(soil_moist_1), soil_moisture2 = mean(soil_moist_2),
-            soil_temp1 = mean(soil_temp_1), soil_temp2 = mean(soil_temp_2),Longitude = first(Longitude), Latitude = first(Latitude))
+            soil_temp1 = mean(soil_temp_1), soil_temp2 = mean(soil_temp_2),Longitude = first(Longitude), Latitude = first(Latitude), Species = first(Species))
 
 
-write.csv(dat3,file="data/processed/US_seasonal_climate.csv")
+write.csv(dat3,file="data/processed/AUS_US_seasonal_climate.csv")
 
 
 AT <- ggplot(dat3,aes(x=Air_temp_mean,y=mean_count)) + 
