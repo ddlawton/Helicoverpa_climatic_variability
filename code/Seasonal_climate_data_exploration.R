@@ -12,7 +12,7 @@ library(data.table)
 library(anytime)
 library(lubridate)
 library(patchwork)
-library(INLA)
+
 
 dat <- fread("data/processed/Helicoverpa_global_data_monthly_climate.csv") %>% as_tibble() %>%
   select(!`system:index`) %>% 
@@ -47,6 +47,10 @@ dat3 <- dat2 %>%
   summarize(rowid = first(rowid),Air_temp_mean = mean(Air_temp),Num_traps = first(Nmbroyt),Precip_mean = mean(Precip),continent = first(contnnt),
             mean_count = first(mdn_cnt),se_count = first(se_cont),soil_moisture1 = mean(soil_moist_1), soil_moisture2 = mean(soil_moist_2),
             soil_temp1 = mean(soil_temp_1), soil_temp2 = mean(soil_temp_2),Longitude = first(Longitude), Latitude = first(Latitude))
+
+
+write.csv(dat3,file="data/processed/US_seasonal_climate.csv")
+
 
 AT <- ggplot(dat3,aes(x=Air_temp_mean,y=mean_count)) + 
   geom_smooth() + 
@@ -94,7 +98,13 @@ ST2 <- ggplot(dat3,aes(x=soil_temp2,y=mean_count)) +
 
 dat3 <- dat3 %>% mutate(Trap = factor(Trap))
 
-mod <- bam(mean_count ~ s(Air_temp_mean,k=20) + s(Precip_mean,k=20) + s(Trap,bs="re"),data=dat3,select=TRUE,discrete = TRUE,nthreads=4)
+mod <- bam(mean_count ~
+             s(Year,bs="gp",k=20) +
+             s(Air_temp_mean,k=20) + 
+             s(Precip_mean,k=20) + 
+             s(Trap,bs="re") + 
+             s(Num_traps,k=20),
+           data=dat3,select=TRUE,discrete = TRUE,nthreads=6,family=scat())
   
 
 summary(mod)
