@@ -43,6 +43,7 @@ suppressMessages(library(sp))
 suppressMessages(library(pals))
 suppressMessages(library(maps))
 suppressMessages(library(raster))
+suppressMessages(library(splines))
 
 ```
 
@@ -266,7 +267,8 @@ My.lst = list(c(Field.1,  #Spatial Index
                      Trap = Model.in[,"Trap"]))  #Variability by trap location
 
 
-
+summary(Model.in$Precip_mean)
+summary(Model.in$Air_temp_mean)
 Model.in$Count.round = round(Model.in$mean_count, 0) #Response variable, rounded to integer
 range(Model.in$Count.round) 
 hist(Model.in$Count.round) #poisson-like, but very large values
@@ -367,6 +369,7 @@ levelplot(Model.0.rf,
 ### Expanded Model
 Adding additional variables. These are code examples only to show how random effects can be added, don't trust results!
 ```{r}
+#Model 1
 #Model formula
 Frm.1 = Y ~ -1 + intercept.1 + # the -1 species we use a custom intercept (fixed effect)
                 f(Field.1,   #spatial index
@@ -393,15 +396,204 @@ Model.1 = inla(Frm.1,
                                       A = inla.stack.A(Stack.1 ), 
                                       compute = TRUE, 
                                       link = 1), 
-               control.mode = list(restart = TRUE, theta = theta1), #mean estimate from first run, speeds up re-runs
+               control.mode = list(restart = TRUE),# theta = theta1), #mean estimate from first run, speeds up re-runs
                control.compute=list(dic = TRUE, waic = TRUE)) 
 ```
 
+
+
+
+
+adding temperature and precipitation as a random walk effect
+```{r}
+#Model 2
+
+#Need to give the random walk a range:
+
+Model.in$range.air <- inla.group(Model.in$Air_temp_mean, n = 50, method = "quantile")
+Model.in$range.precip <- inla.group(Model.in$Precip_mean, n = 50, method = "quantile")
+
+My.lst_rw = list(c(Field.1,  #Spatial Index
+                list(intercept.1 = 1)), #Intercept
+                list(Temperature = Model.in[,"range.air"],
+                     Precip = Model.in[,"range.precip"],
+                     Effort = Model.in[,"Effort"],   #Number of samples
+                     Year = Model.in[,"Year.int"],   #Index for year order
+                     Species = Model.in[,"Species"], #Species variable
+                     Trap = Model.in[,"Trap"]))  #Variability by trap location
+
+
+
+Model.in$Count.round = round(Model.in$mean_count, 0) #Response variable, rounded to integer
+range(Model.in$Count.round) 
+hist(Model.in$Count.round) #poisson-like, but very large values
+
+Stack_rw = inla.stack(data = list(Y = Model.in$Count.round), #Response variable  
+                                  A = list(A.matrix, 1), #spatial matrix    
+                            effects = My.lst_rw, #all variables of interest
+                                tag = "moth.1") #arbitary label/name
+
+
+
+
+
+
+
+#Model formula
+Frm.2 = Y ~ -1 + intercept.1 + # the -1 species we use a custom intercept (fixed effect)
+                f(Field.1,   #spatial index
+                   model=spde.1) + #spatial prior (random effect)
+                f(Year,         #random effect for year
+                   model="ar1", #autocorrelation between years
+                   constr=TRUE) + 
+                f(Species,   # iid random effect for spp differences (like a factor)
+        				   constr=TRUE, #center on zero
+        				   model="iid") +
+                f(Temperature,     #Year index
+                   model="rw1", # model as a random walk, smooth trend
+                   constr=TRUE) + 
+                f(Precip,     #Year index
+                   model="rw1", # model as a random walk, smooth trend
+                   constr=TRUE) #fixed effects
+
+
+#Model formula
+Frm.3 = Y ~ -1 + intercept.1 + # the -1 species we use a custom intercept (fixed effect)
+                f(Field.1,   #spatial index
+                   model=spde.1) + #spatial prior (random effect)
+                f(Year,         #random effect for year
+                   model="ar1", #autocorrelation between years
+                   constr=TRUE) + 
+                f(Species,   # iid random effect for spp differences (like a factor)
+        				   constr=TRUE, #center on zero
+        				   model="iid") +
+                f(Temperature,     #Year index
+                   model="rw2", # model as a random walk, smooth trend
+                   constr=TRUE) + 
+                f(Precip,     #Year index
+                   model="rw2", # model as a random walk, smooth trend
+                   constr=TRUE) #fixed effects
+       
+
+#theta1 = Model.1$internal.summary.hyperpar$mean
+#theta1 = c(-2.6943879, 2.4375067, -0.2267824, 2.1069014, 1.5681810) #previous run
+
+
+#Execute/run model
+Model.2 = inla(Frm.2, 
+               data = inla.stack.data(Stack_rw, spde=spde.1), 
+               family = "poisson", 
+               verbose = TRUE,
+               control.predictor = list(
+                                      A = inla.stack.A(Stack.1 ), 
+                                      compute = TRUE, 
+                                      link = 1), 
+               control.mode = list(restart = TRUE),# theta = theta1), #mean estimate from first run, speeds up re-runs
+               control.compute=list(dic = TRUE, waic = TRUE)) 
+```
+
+
+Doing a rw2 to compare to rw1
+```{r}
+#Model 3
+
+#Need to give the random walk a range:
+
+Model.in$range.air <- inla.group(Model.in$Air_temp_mean, n = 50, method = "quantile")
+Model.in$range.precip <- inla.group(Model.in$Precip_mean, n = 50, method = "quantile")
+
+My.lst_rw = list(c(Field.1,  #Spatial Index
+                list(intercept.1 = 1)), #Intercept
+                list(Temperature = Model.in[,"range.air"],
+                     Precip = Model.in[,"range.precip"],
+                     Effort = Model.in[,"Effort"],   #Number of samples
+                     Year = Model.in[,"Year.int"],   #Index for year order
+                     Species = Model.in[,"Species"], #Species variable
+                     Trap = Model.in[,"Trap"]))  #Variability by trap location
+
+
+
+Model.in$Count.round = round(Model.in$mean_count, 0) #Response variable, rounded to integer
+range(Model.in$Count.round) 
+hist(Model.in$Count.round) #poisson-like, but very large values
+
+Stack_rw = inla.stack(data = list(Y = Model.in$Count.round), #Response variable  
+                                  A = list(A.matrix, 1), #spatial matrix    
+                            effects = My.lst_rw, #all variables of interest
+                                tag = "moth.1") #arbitary label/name
+
+
+#Model formula
+Frm.3 = Y ~ -1 + intercept.1 + # the -1 species we use a custom intercept (fixed effect)
+                f(Field.1,   #spatial index
+                   model=spde.1) + #spatial prior (random effect)
+                f(Year,         #random effect for year
+                   model="ar1", #autocorrelation between years
+                   constr=TRUE) + 
+                f(Species,   # iid random effect for spp differences (like a factor)
+        				   constr=TRUE, #center on zero
+        				   model="iid") +
+                f(Temperature,     #Year index
+                   model="rw2", # model as a random walk, smooth trend
+                   constr=TRUE) + 
+                f(Precip,     #Year index
+                   model="rw2", # model as a random walk, smooth trend
+                   constr=TRUE) #fixed effects
+       
+
+#theta1 = Model.1$internal.summary.hyperpar$mean
+#theta1 = c(-2.6943879, 2.4375067, -0.2267824, 2.1069014, 1.5681810) #previous run
+
+
+#Execute/run model
+Model.3 = inla(Frm.3, 
+               data = inla.stack.data(Stack_rw, spde=spde.1), 
+               family = "poisson", 
+               verbose = TRUE,
+               control.predictor = list(
+                                      A = inla.stack.A(Stack.1 ), 
+                                      compute = TRUE, 
+                                      link = 1), 
+               control.mode = list(restart = TRUE),# theta = theta1), #mean estimate from first run, speeds up re-runs
+               control.compute=list(dic = TRUE, waic = TRUE)) 
+```
+
+
+
+
+
+
+
+
+
 Some Results
 ```{r}
-summary(Model.1) #summary
+
+
+Model.0$dic$dic
+Model.1$dic$dic
+Model.2$dic$dic
+#Model.3$dic$dic
+
+
+Model.0$waic$waic
+Model.1$waic$waic
+Model.2$waic$waic
+#Model.3$waic$waic
+
+
+
+summary(Model.2) #summary
 
 Model.1$summary.hyperpar[4,] # Rho = correlation.  Years are correlated at about 0.77
+
+Model.0$dic$dic
+Model.1$dic$dic
+
+Model.0$waic$waic
+Model.1$waic$waic
+
+
 ```
 
 Species Effect
@@ -489,5 +681,50 @@ levelplot(Field.stack,
   latticeExtra::layer(sp.polygons(map.copy , fill = "transparent", alpha = 1, lwd=0.75, col = "grey80"))
 ```
 
+### Looking at Air temp and precip relationships
+
+```{r}
+trend.df = Model.2$summary.random$Temperature[,c(1,2,4,6)]   #pull estimates from model
+names(trend.df) = c("Temp", "Mean", "Q2.5", "Q97.5")  #rename
+
+
+
+myspan = 0.5 #smoothness for ggplot
+ggplot(trend.df, aes(Temp, Mean)) +
+        geom_hline(yintercept = 0, 
+                   linetype = "solid",
+                   col = "darkgray",
+                   size = 0.5) +
+        geom_smooth(col = "black", 
+                  method = "loess",
+                  se = FALSE,
+                  lwd = 1) +
+        geom_smooth(data = trend.df, aes(Temp, Q2.5), 
+                    col = "grey40", 
+                    method = "loess",
+                    se = FALSE,
+                    linetype= "dashed",
+                    size=0.1) +
+        geom_smooth(data = trend.df, aes(Temp, Q97.5), 
+                    col = "grey40", 
+                    method = "loess",
+                    se = FALSE,
+                    linetype= "dashed",
+                    size=0.1) +
+        xlab(" ") +
+        ylab("Temporal Trend (log)") +  
+        theme_classic() +
+        theme(axis.text=element_text(size=16),
+              panel.background = element_blank(),
+              plot.background = element_blank(),
+              panel.border = element_blank(),
+              legend.position = "none",
+              strip.background = element_blank(),
+              strip.text = element_text(face="bold", size = 22),
+              axis.title.y = element_text(face="bold", size = 24),
+              axis.text.x = element_text(face="bold", size=18, vjust=0.5, 
+                                         hjust=0.5, angle=0),
+              axis.title.x = element_text(face="bold", size = 26))
+```
 
 
