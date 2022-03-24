@@ -12,9 +12,9 @@ library(data.table)
 library(anytime)
 library(lubridate)
 library(patchwork)
+library(janitor)
 
-
-dat <- fread("data/processed/Helicoverpa_global_data_monthly_climate.csv") %>% as_tibble() %>%
+dat <- fread("data/processed/Helicoverpa_global_data.csv") %>% as_tibble() %>%
   select(!`system:index`) %>% 
   as_tibble() %>%
   mutate(.geo = as.character(regmatches(.geo, gregexpr("\\[\\K[^\\]]+(?=\\])", .geo, perl=TRUE)))) %>%
@@ -30,29 +30,31 @@ seasons <- c("Fall","Winter","Spring")
 
 
 dat3 <- dat2 %>% 
-  tidyr::fill(rowid,Nmbroyt,Species,Trap,Year,contnnt,mdn_cnt,meancnt,se_cont,time_nd,tm_strt,Longitude,Latitude,.direction = "down") %>%
+  clean_names() %>%
+  tidyr::fill(rowid,nmbroyt,species,trap,year,contnnt,mdn_cnt,meancnt,se_cont,time_nd,tm_strt,longitude,latitude,.direction = "down") %>%
   as_tibble() %>%
-  drop_na("Precip") %>% as_tibble() %>%
-  mutate(Precip = Precip * 1000,
+  drop_na("precip") %>% as_tibble() %>%
+  mutate(precip = precip * 1000,
          dates = anytime::anytime(dates/1000),
          climate_month = month(dates),
          climate_year = year(dates),
-         Air_temp = Air_temp - 273.15,
+         air_temp = air_temp - 273.15,
          soil_temp_1 = soil_temp_1 - 273.15,
          soil_temp_2 = soil_temp_2 - 273.15) %>%
   #filter(contnnt == "Australia") %>%
   group_by(rowid) %>%
-  filter(Year == climate_year, climate_month %in% 2:9) %>%
-  group_by(Trap,Year) %>%
-  summarize(rowid = first(rowid),Air_temp_mean = mean(Air_temp),Num_traps = first(Nmbroyt),Precip_mean = mean(Precip),continent = first(contnnt),
+  filter(year == climate_year, climate_month %in% 2:9) %>%
+  group_by(trap,year) %>%
+  summarize(rowid = first(rowid),Air_temp_mean = mean(air_temp),Num_traps = first(nmbroyt),precip_mean = mean(precip),continent = first(contnnt),
             mean_count = first(mdn_cnt),se_count = first(se_cont),soil_moisture1 = mean(soil_moist_1), soil_moisture2 = mean(soil_moist_2),
-            soil_temp1 = mean(soil_temp_1), soil_temp2 = mean(soil_temp_2),Longitude = first(Longitude), Latitude = first(Latitude), Species = first(Species))
+            soil_temp1 = mean(soil_temp_1), soil_temp2 = mean(soil_temp_2),longitude = first(longitude), latitude = first(latitude), species = first(species))
+
+unique(factor(dat3$continent))
+
+write.csv(dat3,file="data/processed/AUS_US_SA_seasonal_climate.csv")
 
 
-write.csv(dat3,file="data/processed/AUS_US_seasonal_climate.csv")
-
-
-AT <- ggplot(dat3,aes(x=Air_temp_mean,y=mean_count)) + 
+AT <- ggplot(dat3,aes(x=Air_temp_mean,y=mean_count,color=continent)) + 
   geom_smooth() + 
   geom_rug(sides="b") +
   coord_cartesian(ylim=c(0,100)) + 
