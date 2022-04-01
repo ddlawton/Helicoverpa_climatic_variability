@@ -1,0 +1,371 @@
+---
+title: "Heliothis_global_modeling"
+author: "Douglas Lawton"
+date: "3/31/2022"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    toc_float: true
+    number_sections: true
+    theme: sandstone
+    highlight: tango
+    code_folding: show
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+setwd("/Users/ddlawton/Dropbox (ASU)/Research/Postdoc/Helicoverpa_climatic_variability")
+```
+```{r}
+
+#Main modeling package
+suppressMessages(library(INLA))
+#install.packages("INLA",repos=c(getOption("repos"),INLA="https://inla.r-inla-download.org/R/stable"), dep=TRUE)
+
+#supporting packages
+suppressMessages(library(reshape2))
+suppressMessages(library(raster))
+suppressMessages(library(corrplot))
+suppressMessages(library(rasterVis))
+suppressMessages(library(rgeos))
+suppressMessages(library(rgl))
+suppressMessages(library(maptools))
+suppressMessages(library(mapproj))
+suppressMessages(library(spdep))
+suppressMessages(library(ggplot2))
+suppressMessages(library(ggthemes))
+suppressMessages(library(GISTools))
+suppressMessages(library(lattice))
+suppressMessages(library(gridExtra))
+suppressMessages(library(spatialEco))
+suppressMessages(library(dplyr))
+suppressMessages(library(sp))
+suppressMessages(library(pals))
+suppressMessages(library(maps))
+suppressMessages(library(raster))
+suppressMessages(library(splines))
+suppressMessages(library(INLAutils))
+
+```
+
+
+# Observations
+```{r}
+Heli.df = read.csv("data/processed/AUS_US_SA_seasonal_climate.csv", 
+                  header = TRUE, sep=",")
+
+dim(Heli.df)
+str(Heli.df)
+
+range(Heli.df$Year)
+unique(Heli.df$Species)
+
+range(Heli.df$Latitude)
+range(Heli.df$Longitude)
+
+range(Heli.df$Num_traps) #sampling effort
+
+range(Heli.df$mean_count)
+length(which(is.na(Heli.df$se_count)))
+length(which(is.na(Heli.df))) #all missing/NA values are in se_count
+```
+
+
+## Observations to Spatial Points
+```{r}
+LL84 = "+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"
+
+Heli.pnts = SpatialPointsDataFrame(Heli.df[,c("longitude","latitude")], Heli.df)
+proj4string(Heli.pnts) = LL84
+
+plot(Heli.pnts, col="red", cex=0.1)
+```
+
+
+# Option 1 (Global Mesh)
+
+## Spatial Extents
+
+Load and simplify world boundaries
+```{r}
+LL84 = "+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"
+
+nProj = "+proj=merc +a=6378137 +b=6378137 +lat_ts=0 +lon_0=0
+         +x_0=0 +y_0=0 +k=1 +units=km +nadgrids=@null +no_defs"
+
+Countries = map("world", 
+                fill = TRUE, 
+                plot = FALSE)
+
+
+IDs = sapply(strsplit(Countries$names, ":"), function(x) x[1])
+
+LL84 = "+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"
+
+Countries = map2SpatialPolygons(Countries, IDs = IDs,
+                                proj4string = CRS(projection(LL84)))
+
+Countries$Names = names(Countries)
+Countries.copy = Countries #for comparison
+Countries = subset(Countries, Names != "Antarctica" & Names != "Greenland") #Remove Antarctica and Greenlan
+
+Countries = gBuffer(Countries, width = 0) #fixes some topological issues
+
+#Add a dataframe  
+pid = sapply(slot(Countries, "polygons"), 
+             function(x) slot(x, "ID"))
+
+p.df = data.frame( ID=1:length(Countries), 
+                   row.names = pid)
+
+Countries = SpatialPolygonsDataFrame(Countries, p.df)
+map.copy = Countries
+
+#Remove small islands
+# breaks into separate polgons
+Countries = explode(Countries, sp=TRUE)
+
+#calculate area
+Countries$Area = gArea(Countries, byid = TRUE) #ignore projection warnings
+
+# Keep big areas
+Countries = subset(Countries, Area > 500) 
+Countries = gBuffer(Countries, width = 1) #smooting and enlarging
+
+plot(Countries.copy, main = "Original") 
+plot(Countries, main = "Simplified")
+plot(Heli.pnts, add=TRUE, col="red", cex=0.1)
+```
+
+Create a raster/grid version for mapping results
+```{r}
+blank.r = raster(res = 1, crs = proj4string(map.copy))
+
+extent(blank.r) = extent(map.copy)
+
+World.r = raster::rasterize(map.copy, 
+                    blank.r,
+                    field = 0, #zero value in polgons
+                    background = NA) #value in oceans
+
+#View raster
+plot(World.r)
+
+#Point version for later mapping
+grid.pnts = rasterToPoints(World.r, sp = TRUE)
+
+grid.pnts@data = grid.pnts@data %>%
+                    as_tibble() %>%
+                    mutate(pLong = grid.pnts@coords[,1],
+                           pLat = grid.pnts@coords[,2],
+                           Set = "grid") %>%
+                    dplyr::select(-layer)
+```
+
+
+## Construct Global Mesh
+```{r}
+MaxEdge = 2.0 #controls edge lengths in triangulations
+
+bdry = inla.sp2segment(Countries) #formats for INLA package
+
+mesh2D = inla.mesh.2d(boundary = bdry, 
+                     cutoff = 1, 
+                     max.edge = MaxEdge,
+                     min.angle = 21) 
+
+plot(mesh2D) #Flat version
+
+MeshLocs = cbind(mesh2D$loc[,1], mesh2D$loc[,2]) #Pull coordinates from flat 2D mesh above (nodes/vertices)
+head(MeshLocs) #long/lat
+
+#Converting to 3D coordinates scaled to 1 Earth Radius
+xyz = as.data.frame(                
+          inla.mesh.map(MeshLocs, #coords from flat version
+                        projection = "longlat", 
+                        inverse = TRUE)) #invert from long/lat
+
+true.radius.of.earth = 6371 #1 Earth Radius
+radius.of.earth = 1 #scale radius to 1
+
+Global.mesh = inla.mesh.create(loc = xyz,
+                         cutoff = 100/true.radius.of.earth, #maximum length to allow
+                         refine=list(max.edge = 3500/true.radius.of.earth, min.angle = 26))
+
+
+Global.mesh$n #number of nodes. More nodes equal more precsion, but also more computer processing/memory
+
+plot(Global.mesh, rgl = TRUE, main = " ") #this code produces a pop-up window where you can click, zoom, and drag mesh in 3D
+
+plot(Global.mesh, #Fancy version above, showing mesh nodes over land
+     rgl=TRUE, 
+     col="lightblue", 
+     draw.vertices=TRUE, 
+     draw.edges=TRUE)
+```
+
+## Link Observations to Mesh 
+Matching observation locations to Global.mesh.
+```{r}
+locs = cbind(Heli.pnts$longitude, Heli.pnts$latitude) #get moth coords
+
+locs = inla.mesh.map(locs, 
+                     projection = "longlat", 
+                     inverse = TRUE) #invert to 3D coords to match with mesh
+
+
+A.matrix = inla.spde.make.A(Global.mesh, loc=locs) #create sparse matrix matching moth locations to geographic position on mesh
+```
+
+## Set Spatial Prior
+This model setting controls the strength of spatial effect (correlation decay)
+```{r}
+Global.mesh$loc
+
+
+as.data.frame(                
+          inla.mesh.map(Global.mesh$loc, #coords from flat version
+                        projection = "longlat", 
+                        inverse = FALSE)) #invert from long/lat
+
+spde.1 = inla.spde2.pcmatern(Global.mesh,
+                             prior.range=c(0.9, 0.01), #First value is a spatial range (1 = 1 Earth Radius), second value is a probability
+                             prior.sigma=c(1, 0.01))  #similar to above, error
+                           
+
+#create a spatial index for each node
+Field.1 = inla.spde.make.index("Field.1", #arbitrary name for the spatial field
+                                spde.1$n.spde) #number of mesh nodes.  just an idex sthe model knows to estimate for each location
+
+str(Field.1) # just index 1 to number of nodes (9459)
+```
+
+
+## Prepare Model Input  
+Example predictors and random effect indices.  
+```{r}
+#make copy of observations
+Model.in = Heli.pnts@data %>% tidyr::drop_na(year)
+summary(Model.in)
+#Checking predicter variables
+
+range(Model.in$air_temp_mean)
+range(Model.in$precip_mean)
+
+
+#Convert "Years" to an integer index 1 to total years
+range(Model.in$year)
+
+Model.in$year.int = as.integer(as.factor(as.character(Model.in$year)))
+range(Model.in$year.int) #62 years
+
+#simple way of acounting for number of samples
+Model.in$effort = Model.in$Num_traps 
+range(Model.in$effort) 
+```
+
+
+## Organize Data
+Because spatial index (Field.1) is a different length than moth dataframe, need to convert to a list object.  
+```{r}
+names(Model.in)
+My.lst = list(c(Field.1,  #Spatial Index
+                list(intercept.1 = 1)), #Intercept
+                list(Temperature = Model.in[,"Air_temp_mean"],
+                     Precip = Model.in[,"precip_mean"],
+                     Effort = Model.in[,"effort"],   #Number of samples
+                     Year = Model.in[,"year.int"],   #Index for year order
+                     Species = Model.in[,"species"], #Species variable
+                     Trap = Model.in[,"trap"]))  #Variability by trap location
+
+
+summary(Model.in$precip_mean)
+summary(Model.in$Air_temp_mean)
+Model.in$Count.round = round(Model.in$mean_count, 0) #Response variable, rounded to integer
+range(Model.in$Count.round) 
+hist(Model.in$Count.round) #poisson-like, but very large values
+
+Stack.1 = inla.stack(data = list(Y = Model.in$Count.round), #Response variable  
+                                  A = list(A.matrix, 1), #spatial matrix    
+                            effects = My.lst, #all variables of interest
+                                tag = "moth.1") #arbitary label/name
+```
+
+
+adding temperature and precipitation as a random walk effect
+```{r}
+#Model 2
+
+#Need to give the random walk a range:
+
+Model.in$range.air <- inla.group(Model.in$Air_temp_mean , n = 50, method = "quantile")
+Model.in$range.precip <- inla.group(Model.in$precip_mean, n = 50, method = "quantile")
+
+My.lst_rw = list(c(Field.1,  #Spatial Index
+                list(intercept.1 = 1)), #Intercept
+                list(Temperature = Model.in[,"range.air"],
+                     Precip = Model.in[,"range.precip"],
+                     Effort = Model.in[,"effort"],   #Number of samples
+                     Year = Model.in[,"year.int"],   #Index for year order
+                     Species = Model.in[,"species"], #Species variable
+                     Trap = Model.in[,"trap"]))  #Variability by trap location
+
+
+
+Model.in$Count.round = round(Model.in$mean_count, 0) #Response variable, rounded to integer
+range(Model.in$Count.round) 
+hist(Model.in$Count.round) #poisson-like, but very large values
+
+Stack_rw = inla.stack(data = list(Y = Model.in$Count.round), #Response variable  
+                                  A = list(A.matrix, 1), #spatial matrix    
+                            effects = My.lst_rw, #all variables of interest
+                                tag = "moth.1") #arbitary label/name
+
+
+
+
+
+
+
+#Model formula
+Frm.2 = Y ~ -1 + intercept.1 + # the -1 species we use a custom intercept (fixed effect)
+                f(Field.1,   #spatial index
+                   model=spde.1) + #spatial prior (random effect)
+                f(Year,         #random effect for year
+                   model="ar1", #autocorrelation between years
+                   constr=TRUE) + 
+
+                 f(Trap,   # iid random effect for spp differences (like a factor)
+        				   constr=TRUE, #center on zero
+        				   model="iid") +
+  
+                f(Species,   # iid random effect for spp differences (like a factor)
+        				   constr=TRUE, #center on zero
+        				   model="iid") +
+                f(Temperature,     #Year index
+                  replicate = Species,
+                   model="rw1", # model as a random walk, smooth trend
+                   constr=TRUE) + 
+                f(Precip,     #Year index
+                   model="rw1", # model as a random walk, smooth trend
+                   constr=TRUE) #fixed effects
+
+
+#theta1 = Model.1$internal.summary.hyperpar$mean
+#theta1 = c(-2.6943879, 2.4375067, -0.2267824, 2.1069014, 1.5681810) #previous run
+
+
+#Execute/run model
+Model.2 = inla(Frm.2, 
+               data = inla.stack.data(Stack_rw, spde=spde.1), 
+               family = "poisson", 
+               verbose = TRUE,
+               control.predictor = list(
+                                      A = inla.stack.A(Stack_rw ), 
+                                      compute = TRUE, 
+                                      link = 1), 
+               control.mode = list(restart = TRUE),# theta = theta1), #mean estimate from first run, speeds up re-runs
+               control.compute=list(dic = TRUE, waic = TRUE)) 
+```

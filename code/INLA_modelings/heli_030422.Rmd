@@ -44,12 +44,13 @@ suppressMessages(library(pals))
 suppressMessages(library(maps))
 suppressMessages(library(raster))
 suppressMessages(library(splines))
+suppressMessages(library(INLAutils))
 
 ```
 
 # Observations
 ```{r}
-Heli.df = read.csv("data/processed/AUS_US_seasonal_climate.csv", 
+Heli.df = read.csv("data/processed/AUS_US_SA_seasonal_climate.csv", 
                   header = TRUE, sep=",")
 
 dim(Heli.df)
@@ -73,7 +74,7 @@ length(which(is.na(Heli.df))) #all missing/NA values are in se_count
 ```{r}
 LL84 = "+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"
 
-Heli.pnts = SpatialPointsDataFrame(Heli.df[,c("Longitude","Latitude")], Heli.df)
+Heli.pnts = SpatialPointsDataFrame(Heli.df[,c("longitude","latitude")], Heli.df)
 proj4string(Heli.pnts) = LL84
 
 plot(Heli.pnts, col="red", cex=0.1)
@@ -205,7 +206,7 @@ plot(Global.mesh, #Fancy version above, showing mesh nodes over land
 ## Link Observations to Mesh 
 Matching observation locations to Global.mesh.
 ```{r}
-locs = cbind(Heli.pnts$Longitude, Heli.pnts$Latitude) #get moth coords
+locs = cbind(Heli.pnts$longitude, Heli.pnts$latitude) #get moth coords
 
 locs = inla.mesh.map(locs, 
                      projection = "longlat", 
@@ -218,8 +219,20 @@ A.matrix = inla.spde.make.A(Global.mesh, loc=locs) #create sparse matrix matchin
 ## Set Spatial Prior
 This model setting controls the strength of spatial effect (correlation decay)
 ```{r}
+Global.mesh$loc
+
+
+as.data.frame(                
+          inla.mesh.map(Global.mesh$loc, #coords from flat version
+                        projection = "longlat", 
+                        inverse = FALSE)) #invert from long/lat
+
 spde.1 = inla.spde2.pcmatern(Global.mesh,
                              prior.range=c(0.9, 0.01), #First value is a spatial range (1 = 1 Earth Radius), second value is a probability
+                             prior.sigma=c(1, 0.01))  #similar to above, error
+
+spde.2 = inla.spde2.pcmatern(Global.mesh,
+                             prior.range=c(0.9, 0.8), #First value is a spatial range (1 = 1 Earth Radius), second value is a probability
                              prior.sigma=c(1, 0.01))  #similar to above, error
                            
 
@@ -234,40 +247,41 @@ str(Field.1) # just index 1 to number of nodes (9459)
 Example predictors and random effect indices.  
 ```{r}
 #make copy of observations
-Model.in = Heli.pnts@data
-
+Model.in = Heli.pnts@data %>% tidyr::drop_na(year)
+summary(Model.in)
 #Checking predicter variables
 
-range(Model.in$Air_temp_mean)
-range(Model.in$Precip_mean)
+range(Model.in$air_temp_mean)
+range(Model.in$precip_mean)
 
 
 #Convert "Years" to an integer index 1 to total years
-range(Model.in$Year)
+range(Model.in$year)
 
-Model.in$Year.int = as.integer(as.factor(as.character(Model.in$Year)))
-range(Model.in$Year.int) #62 years
+Model.in$year.int = as.integer(as.factor(as.character(Model.in$year)))
+range(Model.in$year.int) #62 years
 
 #simple way of acounting for number of samples
-Model.in$Effort = Model.in$Num_traps
-range(Model.in$Effort) 
+Model.in$effort = Model.in$Num_traps 
+range(Model.in$effort) 
 ```
 
 
 ## Organize Data
 Because spatial index (Field.1) is a different length than moth dataframe, need to convert to a list object.  
 ```{r}
+names(Model.in)
 My.lst = list(c(Field.1,  #Spatial Index
                 list(intercept.1 = 1)), #Intercept
                 list(Temperature = Model.in[,"Air_temp_mean"],
-                     Precip = Model.in[,"Precip_mean"],
-                     Effort = Model.in[,"Effort"],   #Number of samples
-                     Year = Model.in[,"Year.int"],   #Index for year order
-                     Species = Model.in[,"Species"], #Species variable
-                     Trap = Model.in[,"Trap"]))  #Variability by trap location
+                     Precip = Model.in[,"precip_mean"],
+                     Effort = Model.in[,"effort"],   #Number of samples
+                     Year = Model.in[,"year.int"],   #Index for year order
+                     Species = Model.in[,"species"], #Species variable
+                     Trap = Model.in[,"trap"]))  #Variability by trap location
 
 
-summary(Model.in$Precip_mean)
+summary(Model.in$precip_mean)
 summary(Model.in$Air_temp_mean)
 Model.in$Count.round = round(Model.in$mean_count, 0) #Response variable, rounded to integer
 range(Model.in$Count.round) 
@@ -286,22 +300,22 @@ Stack.1 = inla.stack(data = list(Y = Model.in$Count.round), #Response variable
 #Model formula
 Frm.0 = Y ~ -1 + intercept.1 + # the -1 species we use a custom intercept
                   f(Field.1,   #spatial index
-                    model=spde.1) #spatial prior
+                    model=spde.2) #spatial prior
 
-#theta0 = Model.0$internal.summary.hyperpar$mean
-theta0 = c( -2.616065, 2.245625) #previous run hyperparameters
+theta0 = Model.0$internal.summary.hyperpar$mean
+theta0 = c(-2.606000, 2.172291) #previous run hyperparameters
 
 
 #Execute/run model
 Model.0 = inla(Frm.0, 
-               data = inla.stack.data(Stack.1, spde=spde.1), 
+               data = inla.stack.data(Stack.1, spde=spde.2), 
                family = "poisson", 
-               verbose = FALSE,
+               verbose = TRUE,
                control.predictor = list(
                                       A = inla.stack.A(Stack.1 ), 
                                       compute = TRUE, 
                                       link = 1), 
-               control.mode = list(restart = TRUE, theta = theta0), #mean estimate from first run, speeds up re-runs
+               control.mode = list(restart = TRUE), #mean estimate from first run, speeds up re-runs
                control.compute=list(dic = TRUE, waic = TRUE)) 
 ```
 
@@ -396,7 +410,7 @@ Model.1 = inla(Frm.1,
                                       A = inla.stack.A(Stack.1 ), 
                                       compute = TRUE, 
                                       link = 1), 
-               control.mode = list(restart = TRUE),# theta = theta1), #mean estimate from first run, speeds up re-runs
+               control.mode = list(restart = TRUE), #mean estimate from first run, speeds up re-runs
                control.compute=list(dic = TRUE, waic = TRUE)) 
 ```
 
@@ -410,17 +424,17 @@ adding temperature and precipitation as a random walk effect
 
 #Need to give the random walk a range:
 
-Model.in$range.air <- inla.group(Model.in$Air_temp_mean, n = 50, method = "quantile")
-Model.in$range.precip <- inla.group(Model.in$Precip_mean, n = 50, method = "quantile")
+Model.in$range.air <- inla.group(Model.in$Air_temp_mean , n = 50, method = "quantile")
+Model.in$range.precip <- inla.group(Model.in$precip_mean, n = 50, method = "quantile")
 
 My.lst_rw = list(c(Field.1,  #Spatial Index
                 list(intercept.1 = 1)), #Intercept
                 list(Temperature = Model.in[,"range.air"],
                      Precip = Model.in[,"range.precip"],
-                     Effort = Model.in[,"Effort"],   #Number of samples
-                     Year = Model.in[,"Year.int"],   #Index for year order
-                     Species = Model.in[,"Species"], #Species variable
-                     Trap = Model.in[,"Trap"]))  #Variability by trap location
+                     Effort = Model.in[,"effort"],   #Number of samples
+                     Year = Model.in[,"year.int"],   #Index for year order
+                     Species = Model.in[,"species"], #Species variable
+                     Trap = Model.in[,"trap"]))  #Variability by trap location
 
 
 
@@ -446,10 +460,16 @@ Frm.2 = Y ~ -1 + intercept.1 + # the -1 species we use a custom intercept (fixed
                 f(Year,         #random effect for year
                    model="ar1", #autocorrelation between years
                    constr=TRUE) + 
+
+                 f(Trap,   # iid random effect for spp differences (like a factor)
+        				   constr=TRUE, #center on zero
+        				   model="iid") +
+  
                 f(Species,   # iid random effect for spp differences (like a factor)
         				   constr=TRUE, #center on zero
         				   model="iid") +
                 f(Temperature,     #Year index
+                  replicate = Species,
                    model="rw1", # model as a random walk, smooth trend
                    constr=TRUE) + 
                 f(Precip,     #Year index
@@ -500,16 +520,16 @@ Doing a rw2 to compare to rw1
 #Need to give the random walk a range:
 
 Model.in$range.air <- inla.group(Model.in$Air_temp_mean, n = 50, method = "quantile")
-Model.in$range.precip <- inla.group(Model.in$Precip_mean, n = 50, method = "quantile")
+Model.in$range.precip <- inla.group(Model.in$precip_mean, n = 50, method = "quantile")
 
 My.lst_rw = list(c(Field.1,  #Spatial Index
                 list(intercept.1 = 1)), #Intercept
                 list(Temperature = Model.in[,"range.air"],
                      Precip = Model.in[,"range.precip"],
-                     Effort = Model.in[,"Effort"],   #Number of samples
-                     Year = Model.in[,"Year.int"],   #Index for year order
-                     Species = Model.in[,"Species"], #Species variable
-                     Trap = Model.in[,"Trap"]))  #Variability by trap location
+                     Effort = Model.in[,"effort"],   #Number of samples
+                     Year = Model.in[,"year.int"],   #Index for year order
+                     Species = Model.in[,"species"], #Species variable
+                     Trap = Model.in[,"trap"]))  #Variability by trap location
 
 
 
@@ -581,11 +601,14 @@ Model.1$waic$waic
 Model.2$waic$waic
 #Model.3$waic$waic
 
+INLAutils
+p <- autoplot(Model.2)
+
 
 
 summary(Model.2) #summary
 
-Model.1$summary.hyperpar[4,] # Rho = correlation.  Years are correlated at about 0.77
+Model.2$summary.hyperpar[4,] # Rho = correlation.  Years are correlated at about 0.77
 
 Model.0$dic$dic
 Model.1$dic$dic
@@ -598,9 +621,9 @@ Model.1$waic$waic
 
 Species Effect
 ```{r fig.width=8, fig.height=8}
-Model.1$summary.random$Species #species iid levels
+Model.2$summary.random$Species #species iid levels
 
-my.data = as.data.frame(Model.1$summary.random$Species)
+my.data = as.data.frame(Model.2$summary.random$Species)
 names(my.data) = c("ID", "Mean", "sd", "Q025", "Q50", "Q975", "mode", "kld")
 
 ggplot(my.data, aes(ID, y=Mean)) + 
@@ -633,10 +656,10 @@ pLoc = inla.mesh.map(pLoc,
 
 Ap = inla.spde.make.A(Global.mesh, loc=pLoc) #match to mesh
 
-grid.pnts$Spatial.Field = drop(Ap %*% Model.1$summary.random$Field.1$mean)  #mean values for spatial field, add to grid pnts
+grid.pnts$Spatial.Field = drop(Ap %*% Model.2$summary.random$Field.1$mean)  #mean values for spatial field, add to grid pnts
 
 #map to grid
-Model.1.rf = rasterize(grid.pnts, 
+Model.2.rf = rasterize(grid.pnts, 
                       World.r,
                       field = "Spatial.Field", #
                       background = NA) 
@@ -645,8 +668,9 @@ Model.1.rf = rasterize(grid.pnts,
 
 ### Compare Spatial Random Field
 ```{r fig.width=8, fig.height=10}
-Field.stack = stack(Model.0.rf, Model.1.rf)
+Field.stack = stack(Model.0.rf, Model.2.rf)
 names(Field.stack) = c("Spatial.Only", "Expanded")
+
 
 
 range(values(Field.stack), na.rm=T)
@@ -696,23 +720,66 @@ ggplot(trend.df, aes(Temp, Mean)) +
                    col = "darkgray",
                    size = 0.5) +
         geom_smooth(col = "black", 
-                  method = "loess",
+                  method = "gam",
                   se = FALSE,
                   lwd = 1) +
         geom_smooth(data = trend.df, aes(Temp, Q2.5), 
+                    col = "grey40", 
+                    method = "gam",
+                    se = FALSE,
+                    linetype= "dashed",
+                    size=0.1) +
+        geom_smooth(data = trend.df, aes(Temp, Q97.5), 
+                    col = "grey40", 
+                    method = "gam",
+                    se = FALSE,
+                    linetype= "dashed",
+                    size=0.1) +
+        xlab(" ") +
+        ylab("Temperature Trend") +  
+        theme_classic() +
+        theme(axis.text=element_text(size=16),
+              panel.background = element_blank(),
+              plot.background = element_blank(),
+              panel.border = element_blank(),
+              legend.position = "none",
+              strip.background = element_blank(),
+              strip.text = element_text(face="bold", size = 22),
+              axis.title.y = element_text(face="bold", size = 24),
+              axis.text.x = element_text(face="bold", size=18, vjust=0.5, 
+                                         hjust=0.5, angle=0),
+              axis.title.x = element_text(face="bold", size = 26))
+
+
+trend.df = Model.2$summary.random$Precip[,c(1,2,4,6)]   #pull estimates from model
+names(trend.df) = c("Precip", "Mean", "Q2.5", "Q97.5")  #rename
+
+
+
+myspan = 0.5 #smoothness for ggplot
+ggplot(trend.df, aes(Precip, Mean)) +
+        geom_hline(yintercept = 0, 
+                   linetype = "solid",
+                   col = "darkgray",
+                   size = 0.5) +
+        geom_smooth(col = "black", 
+                  method = "loess",
+                  se = FALSE,
+                  lwd = 1) +
+        geom_smooth(data = trend.df, aes(Precip, Q2.5), 
                     col = "grey40", 
                     method = "loess",
                     se = FALSE,
                     linetype= "dashed",
                     size=0.1) +
-        geom_smooth(data = trend.df, aes(Temp, Q97.5), 
+        geom_smooth(data = trend.df, aes(Precip, Q97.5), 
                     col = "grey40", 
                     method = "loess",
                     se = FALSE,
                     linetype= "dashed",
                     size=0.1) +
         xlab(" ") +
-        ylab("Temporal Trend (log)") +  
+        ylab("Precipitation Trend") +  
         theme_classic() +
         theme(axis.text=element_text(size=16),
               panel.background = element_blank(),

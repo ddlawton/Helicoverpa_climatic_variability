@@ -1,0 +1,202 @@
+---
+title: "Mesh_construction"
+author: "Douglas Lawton"
+date: "4/1/2022"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    toc_float: true
+    number_sections: true
+    theme: sandstone
+    highlight: tango
+    code_folding: show
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+setwd("/Users/ddlawton/Dropbox (ASU)/Research/Postdoc/Helicoverpa_climatic_variability")
+```
+```{r}
+
+#Main modeling package
+suppressMessages(library(INLA))
+#install.packages("INLA",repos=c(getOption("repos"),INLA="https://inla.r-inla-download.org/R/stable"), dep=TRUE)
+
+#supporting packages
+suppressMessages(library(reshape2))
+suppressMessages(library(raster))
+suppressMessages(library(corrplot))
+suppressMessages(library(rasterVis))
+suppressMessages(library(rgeos))
+suppressMessages(library(rgl))
+suppressMessages(library(maptools))
+suppressMessages(library(mapproj))
+suppressMessages(library(spdep))
+suppressMessages(library(ggplot2))
+suppressMessages(library(ggthemes))
+suppressMessages(library(GISTools))
+suppressMessages(library(lattice))
+suppressMessages(library(gridExtra))
+suppressMessages(library(spatialEco))
+suppressMessages(library(dplyr))
+suppressMessages(library(sp))
+suppressMessages(library(pals))
+suppressMessages(library(maps))
+suppressMessages(library(raster))
+suppressMessages(library(splines))
+suppressMessages(library(INLAutils))
+
+```
+
+
+
+
+# Option 1 (Global Mesh)
+
+## Spatial Extents
+
+Load and simplify world boundaries
+```{r}
+LL84 = "+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"
+
+nProj = "+proj=merc +a=6378137 +b=6378137 +lat_ts=0 +lon_0=0
+         +x_0=0 +y_0=0 +k=1 +units=km +nadgrids=@null +no_defs"
+
+Countries = map("world", 
+                fill = TRUE, 
+                plot = FALSE)
+
+
+IDs = sapply(strsplit(Countries$names, ":"), function(x) x[1])
+
+LL84 = "+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"
+
+Countries = map2SpatialPolygons(Countries, IDs = IDs,
+                                proj4string = CRS(projection(LL84)))
+
+Countries$Names = names(Countries)
+Countries.copy = Countries #for comparison
+Countries = subset(Countries, Names != "Antarctica" & Names != "Greenland") #Remove Antarctica and Greenlan
+
+Countries = gBuffer(Countries, width = 0) #fixes some topological issues
+
+#Add a dataframe  
+pid = sapply(slot(Countries, "polygons"), 
+             function(x) slot(x, "ID"))
+
+p.df = data.frame( ID=1:length(Countries), 
+                   row.names = pid)
+
+Countries = SpatialPolygonsDataFrame(Countries, p.df)
+map.copy = Countries
+
+#Remove small islands
+# breaks into separate polgons
+Countries = explode(Countries, sp=TRUE)
+
+#calculate area
+Countries$Area = gArea(Countries, byid = TRUE) #ignore projection warnings
+
+# Keep big areas
+Countries = subset(Countries, Area > 500) 
+Countries = gBuffer(Countries, width = 1) #smooting and enlarging
+
+plot(Countries.copy, main = "Original") 
+plot(Countries, main = "Simplified")
+plot(Heli.pnts, add=TRUE, col="red", cex=0.1)
+```
+
+Create a raster/grid version for mapping results
+```{r}
+blank.r = raster(res = 1, crs = proj4string(map.copy))
+
+extent(blank.r) = extent(map.copy)
+
+World.r = raster::rasterize(map.copy, 
+                    blank.r,
+                    field = 0, #zero value in polgons
+                    background = NA) #value in oceans
+
+#View raster
+plot(World.r)
+
+#Point version for later mapping
+grid.pnts = rasterToPoints(World.r, sp = TRUE)
+
+grid.pnts@data = grid.pnts@data %>%
+                    as_tibble() %>%
+                    mutate(pLong = grid.pnts@coords[,1],
+                           pLat = grid.pnts@coords[,2],
+                           Set = "grid") %>%
+                    dplyr::select(-layer)
+```
+
+
+## Construct Global Mesh
+```{r}
+MaxEdge = 2.0 #controls edge lengths in triangulations
+
+bdry = inla.sp2segment(Countries) #formats for INLA package
+
+mesh2D = inla.mesh.2d(boundary = bdry, 
+                     cutoff = 1, 
+                     max.edge = MaxEdge,
+                     min.angle = 21) 
+
+plot(mesh2D) #Flat version
+
+
+
+
+mesh_data <- mesh2D$loc %>% as_data_frame() %>%
+  select(1:2) %>%
+  rename(longitude = V1, latitude = V2) %>%
+  mutate(mesh_id = paste0("mesh_",row_number()))
+
+medsh_id <- unique(mesh_data$mesh_id)
+
+years <- seq(1981,2021,by=1)
+
+
+
+```
+
+Plotting to ensure that there are not points within the ocean
+```{r}
+
+
+projcrs <- "+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"
+df <- st_as_sf(x = mesh_data,                         
+           coords = c("longitude", "latitude"),
+           crs = projcrs)
+
+plot(df)
+
+
+
+```
+
+
+Now adding years from 1981 to 2021
+```{r}
+mesh_years <- rep(years,nrow(mesh_data)) %>% tibble %>%
+  mutate(mesh_id = rep(medsh_id,each=length(years))) %>%
+  janitor::clean_names() %>%
+  rename(year = x)
+
+
+combined_mesh <- mesh_years %>% left_join(mesh_data,by="mesh_id") %>%
+  mutate(mesh_id = factor(mesh_id),
+         before_year = year - 1,
+         time_end = paste0(year,"-09-","30"),
+         time_start  = paste0(before_year,"-02-","01"))
+
+summary(combined_mesh)
+
+#writing out the data to import into google earth engine
+write.csv(combined_mesh,file="data/processed/INLA_mesh_data.csv",row.names = FALSE)
+
+```
+
