@@ -1,0 +1,313 @@
+---
+title: "April 11 data reformatting"
+author: "Douglas"
+date: "4/11/2022"
+output: html_document
+---
+
+#main purpose
+
+I am reconstructing the data base to have relevant time spans for the remotely sensed data extraction revovling around the equinoxes. This will include the actual data at the NA mesh data. Hopefully.
+
+
+```{r}
+setwd("/Users/ddlawton/Dropbox (ASU)/Research/Postdoc/Helicoverpa_climatic_variability")
+```
+
+```{r}
+
+#Packages
+suppressMessages(library(INLA))
+suppressMessages(library(reshape2))
+suppressMessages(library(raster))
+suppressMessages(library(corrplot))
+suppressMessages(library(rasterVis))
+suppressMessages(library(rgeos))
+suppressMessages(library(rgl))
+suppressMessages(library(maptools))
+suppressMessages(library(mapproj))
+suppressMessages(library(spdep))
+suppressMessages(library(ggplot2))
+suppressMessages(library(ggthemes))
+suppressMessages(library(GISTools))
+suppressMessages(library(lattice))
+suppressMessages(library(gridExtra))
+suppressMessages(library(spatialEco))
+suppressMessages(library(tidyverse))
+suppressMessages(library(sp))
+suppressMessages(library(pals))
+suppressMessages(library(maps))
+suppressMessages(library(raster))
+suppressMessages(library(rnaturalearth))
+suppressMessages(library(janitor))
+suppressMessages(library(lubridate))
+```
+
+
+# loading in the observations and combining them all together
+```{r}
+us_dat <- read_csv("data/raw/US_dat/Hzea_dat.csv")
+Baker_dat <- read_csv("data/processed/AUS_data/Baker_dat.csv")
+myron_dat <- read_csv("data/processed/AUS_data/myron_data.csv")
+sa_dat <- read_csv("data/processed/SA_dat/combined_sa_dat.csv")
+
+
+se <- function(x) sqrt(var(x)/length(x))
+
+# combining all data together
+ 
+b_cleaned <- Baker_dat %>% 
+  drop_na(mean_count) %>%
+  select(Week,before,mean_count,Species,dataset) %>%
+  rename(Year = before, count=mean_count) %>%
+  mutate(Latitude = -30.206009806160633, Longitude = 149.59603761497965, Trap="Baker_dat")
+
+m_cleaned<- myron_dat %>%
+  mutate(Week = isoweek(Date),Year = year(Date)) %>%
+  pivot_longer(cols=c(H_arm,H_punc),names_to = "Species",values_to = "count") %>%
+  drop_na(count) %>%
+  select(dataset,Latitude,Longitude,Week,Year,Species,count,Trap)
+  
+AUS_dat <- rbind(b_cleaned,m_cleaned) %>% mutate(continent = "Australia")
+
+US_dat2 <- us_dat %>%
+  select(woy,year,CEW_sum,location,longitude,latitude)%>%
+  rename(Week = woy, Year = year,count = CEW_sum, Trap = location,Latitude=latitude,Longitude=longitude) %>%
+  mutate(Species = "H_zea", dataset="US")  %>% mutate(continent = "North_America")
+
+
+sa_dat2 <- sa_dat %>%
+  select(year,h_arm,h_zea,date,Latitude,Longitude,Trap_ID) %>%
+  pivot_longer(cols=c(starts_with("h_")),names_to = "Species",values_to = "Count") %>%
+  mutate(year = year(date), Week = isoweek(date), dataset="SA", continent = "South_America",
+         Species = factor(Species),Trap = (Trap_ID)) %>%
+  select(!date) %>%
+  group_by(year,Week,Trap,Species) %>%
+  summarise(Count = sum(Count,na.rm=TRUE), Longitude = first(Longitude), Latitude = first(Latitude), dataset = first(dataset), continent = first(continent)) %>%
+  clean_names()
+  
+
+
+
+dat <- rbind(AUS_dat,US_dat2) %>% 
+  clean_names() %>%
+  rbind(sa_dat2) %>%
+  mutate(
+  species = case_when(
+    species == "arm" ~ "H_arm",
+    species == "punc" ~ "H_punc",
+    species == "h_arm" ~ "H_arm",
+    species == "h_punc" ~ "H_punc",
+    species == "h_zea" ~ "H_zea",
+    TRUE ~ species
+  )
+) 
+
+
+unique(factor(dat$species))
+
+unique(factor(dat$continent))
+
+
+```
+
+
+# Plotting to ensure all the points are on land
+
+```{r}
+
+world <- ne_countries() %>% st_as_sf()
+
+ggplot(data=world) +
+  geom_sf(aes(geometry=geometry)) +
+  geom_point(data=dat,aes(x=longitude,y=latitude),pch=21,size=0.75) +
+  theme_void()
+
+#Everything looks fine. The south american dataset will be added shortly.
+
+
+```
+
+
+```{r}
+
+# Summarizing to the year
+
+yearly_dat <- dat %>%
+  group_by(year,trap,species) %>%
+  summarize(`mean count` = mean(count),median_count = median(count), total_count = sum(count),
+            se_count = se(count),Latitude = first(latitude),Longitude = first(longitude), continent = first(continent),num_yearly_trap_obs = length(trap)) %>%
+  group_by(year) %>%
+  mutate(num_yearly_traps = length(unique(trap)),type = "data", Hemisphere = case_when(Latitude <= 0 ~ "Southern", Latitude > 0 ~ "Northern")) 
+
+
+```
+
+
+# constructing the global mesh
+
+Load and simplify world boundaries
+```{r}
+LL84 = "+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"
+
+nProj = "+proj=merc +a=6378137 +b=6378137 +lat_ts=0 +lon_0=0
+         +x_0=0 +y_0=0 +k=1 +units=km +nadgrids=@null +no_defs"
+
+Countries = maps::map("world", 
+                fill = TRUE, 
+                plot = FALSE)
+
+
+IDs = sapply(strsplit(Countries$names, ":"), function(x) x[1])
+
+LL84 = "+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"
+
+Countries = map2SpatialPolygons(Countries, IDs = IDs,
+                                proj4string = CRS(projection(LL84)))
+
+Countries$Names = names(Countries)
+Countries.copy = Countries #for comparison
+Countries = subset(Countries, Names != "Antarctica" & Names != "Greenland") #Remove Antarctica and Greenlan
+
+Countries = gBuffer(Countries, width = 0) #fixes some topological issues
+
+#Add a dataframe  
+pid = sapply(slot(Countries, "polygons"), 
+             function(x) slot(x, "ID"))
+
+p.df = data.frame( ID=1:length(Countries), 
+                   row.names = pid)
+
+Countries = SpatialPolygonsDataFrame(Countries, p.df)
+map.copy = Countries
+
+#Remove small islands
+# breaks into separate polgons
+Countries = explode(Countries, sp=TRUE)
+
+#calculate area
+Countries$Area = gArea(Countries, byid = TRUE) #ignore projection warnings
+
+# Keep big areas
+Countries = subset(Countries, Area > 500) 
+Countries = gBuffer(Countries, width = 1) #smooting and enlarging
+
+plot(Countries.copy, main = "Original") 
+plot(Countries, main = "Simplified")
+plot(Heli.pnts, add=TRUE, col="red", cex=0.1)
+```
+
+Create a raster/grid version for mapping results
+```{r}
+blank.r = raster(res = 1, crs = proj4string(map.copy))
+
+extent(blank.r) = extent(map.copy)
+
+World.r = raster::rasterize(map.copy, 
+                    blank.r,
+                    field = 0, #zero value in polgons
+                    background = NA) #value in oceans
+
+#View raster
+plot(World.r)
+
+#Point version for later mapping
+grid.pnts = rasterToPoints(World.r, sp = TRUE)
+
+grid.pnts@data = grid.pnts@data %>%
+                    as_tibble() %>%
+                    mutate(pLong = grid.pnts@coords[,1],
+                           pLat = grid.pnts@coords[,2],
+                           Set = "grid") %>%
+                    dplyr::select(-layer)
+```
+
+
+## Construct Global Mesh and make a dataframe of points to get NA data
+
+```{r}
+MaxEdge = 2.0 #controls edge lengths in triangulations
+
+bdry = inla.sp2segment(Countries) #formats for INLA package
+
+mesh2D = inla.mesh.2d(boundary = bdry, 
+                     cutoff = 1, 
+                     max.edge = MaxEdge,
+                     min.angle = 21) 
+
+plot(mesh2D) #Flat version
+
+MeshLocs = cbind(mesh2D$loc[,1], mesh2D$loc[,2]) %>% as_tibble() %>%
+  rename(Longitude = V1, Latitude = V2) %>%
+  mutate(type = "mesh", Hemisphere = case_when(Latitude <= 0 ~ "Southern", Latitude > 0 ~ "Northern")) %>%
+  rowid_to_column(var="rowid") %>%
+  mutate(ID = paste0(type,"_",rowid)) %>%
+  select(!rowid)
+
+years <- rep(seq(1981,2020,by=1),times=10471)
+
+
+meshids <- rep(MeshLocs$ID,each=40) %>% cbind(years) %>%
+  as_tibble() %>%
+  rename(ID = ".") %>%
+  left_join(MeshLocs,by="ID")
+
+
+head(meshids)
+
+
+```
+
+
+# Now combining the Helicoverpa data frame with the empty mesh data
+
+```{r}
+
+meshids_bind <- meshids %>%
+  rename(trap = ID,year=years) %>%
+  mutate(continent = NA,num_yearly_trap_obs = NA,num_yearly_traps = NA, species = NA,
+         `mean count` = NA,median_count = NA,se_count = NA, year=as.numeric(year),total_count = NA)
+
+combined <- yearly_dat %>% rbind(meshids_bind)  %>% clean_names() %>%
+  drop_na(year) %>%
+  mutate(year_before = year - 1 ,
+    time_start = case_when(
+      hemisphere == "Southern" ~ paste0(year_before,"-03-20"),
+      hemisphere == "Northern" ~ paste0(year_before,"-09-22")),
+    time_end = case_when(
+      hemisphere == "Southern" ~ paste0(year,"-03-20"),
+      hemisphere == "Northern" ~ paste0(year,"-09-22"))) 
+
+summary(combined)
+```
+
+# write out CSV for use in google earth engine
+
+```{r}
+write.csv(combined,file="data/processed/INLA_modeling_mesh_with_data_20220411.csv",row.names = FALSE)
+
+# there is something weird happening with the import of the CSV. I am uploading it as a shapefile
+
+Heli.pnts = SpatialPointsDataFrame(combined[,c("longitude","latitude")], combined) %>% st_as_sf()
+plot(Heli.pnts)
+
+dat_sf <- combined %>%
+  st_as_sf(.,coords=c("longitude","latitude"),crs=4326)
+
+
+view(dat_sf %>% filter(continent == "South_America"))
+
+dat_sf2 <- dat_sf %>%
+  mutate(before_year = year - 1,
+        time_end = paste0(year,"-09-","30"),
+         time_start  = paste0(before_year,"-02-","01")) %>%
+  filter(before_year >= 1981) %>%
+  select(!before_year) 
+summary(dat_sf2)
+
+
+st_write(dat_sf, "data/processed/ugly_shapefile/Heliocoverpa_data.shp")
+
+
+```
+
