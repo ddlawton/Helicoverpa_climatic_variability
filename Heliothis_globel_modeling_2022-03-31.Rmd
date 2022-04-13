@@ -1,19 +1,3 @@
----
-title: "Heliothis_global_modeling"
-author: "Douglas Lawton"
-date: "3/31/2022"
-output:
-  html_document:
-    toc: true
-    toc_depth: 2
-    toc_float: true
-    number_sections: true
-    theme: sandstone
-    highlight: tango
-    code_folding: show
-editor_options: 
-  chunk_output_type: console
----
 
 ```{r}
 setwd("/Users/ddlawton/Dropbox (ASU)/Research/Postdoc/Helicoverpa_climatic_variability")
@@ -49,7 +33,6 @@ suppressMessages(library(splines))
 suppressMessages(library(INLAutils))
 
 ```
-
 
 # Observations
 ```{r}
@@ -233,6 +216,10 @@ as.data.frame(
 spde.1 = inla.spde2.pcmatern(Global.mesh,
                              prior.range=c(0.9, 0.01), #First value is a spatial range (1 = 1 Earth Radius), second value is a probability
                              prior.sigma=c(1, 0.01))  #similar to above, error
+
+spde.2 = inla.spde2.pcmatern(Global.mesh,
+                             prior.range=c(0.9, 0.8), #First value is a spatial range (1 = 1 Earth Radius), second value is a probability
+                             prior.sigma=c(1, 0.01))  #similar to above, error
                            
 
 #create a spatial index for each node
@@ -241,7 +228,6 @@ Field.1 = inla.spde.make.index("Field.1", #arbitrary name for the spatial field
 
 str(Field.1) # just index 1 to number of nodes (9459)
 ```
-
 
 ## Prepare Model Input  
 Example predictors and random effect indices.  
@@ -293,65 +279,191 @@ Stack.1 = inla.stack(data = list(Y = Model.in$Count.round), #Response variable
                                 tag = "moth.1") #arbitary label/name
 ```
 
+## Run Model
 
-adding temperature and precipitation as a random walk effect
+### Simple model first, spatial effect only
+```{r}
+#Model formula
+Frm.0 = Y ~ -1 + intercept.1 + # the -1 species we use a custom intercept
+                  f(Field.1,   #spatial index
+                    model=spde.2) #spatial prior
+
+theta0 = Model.0$internal.summary.hyperpar$mean
+theta0 = c(-2.606000, 2.172291) #previous run hyperparameters
+
+
+#Execute/run model
+Model.0 = inla(Frm.0, 
+               data = inla.stack.data(Stack.1, spde=spde.2), 
+               family = "poisson", 
+               verbose = TRUE,
+               control.predictor = list(
+                                      A = inla.stack.A(Stack.1 ), 
+                                      compute = TRUE, 
+                                      link = 1), 
+               control.mode = list(restart = TRUE), #mean estimate from first run, speeds up re-runs
+               control.compute=list(dic = TRUE, waic = TRUE)) 
+```
+
+Results summary
+```{r}
+summary(Model.0) #intercept and spatial field 
+```
+
+
+map spatial field
+```{r}
+pLoc = cbind(grid.pnts$pLong, grid.pnts$pLat) #coords
+
+pLoc = inla.mesh.map(pLoc, 
+                     projection = "longlat", 
+                     inverse = TRUE) # convert to 3D projection to match with mesh
+
+Ap = inla.spde.make.A(Global.mesh, loc=pLoc) #match to mesh
+
+grid.pnts$Spatial.Field = drop(Ap %*% Model.0$summary.random$Field.1$mean)  #mean values for spatial field, add to grid pnts
+
+#map to grid
+Model.0.rf = raster::rasterize(grid.pnts, 
+                      World.r,
+                      field = "Spatial.Field", #
+                      background = NA) 
+
+```
+
+### View Spatial Random Field
+Model error, latencies, model residuals, etc.
+
+```{r fig.width=8, fig.height=8}
+library(raster)
+
+range(raster::values(Model.0.rf), na.rm=T)
+rng = seq(-17, 36, 0.01)
+
+
+mCols = (coolwarm(1000))
+
+cr = colorRampPalette(c(mCols), 
+         bias = 1.7, alpha = TRUE)
+
+
+levelplot(Model.0.rf,
+          margin = FALSE,
+          xlab = NULL, 
+          ylab = NULL, 
+          maxpixels = 1e5,
+          col.regions = cr, alpha.regions = 1, at = rng,
+          colorkey = list(labels=list(#at=c(0.02, 0.25, 0.50, 0.75, 0.98),  
+                                 #labels=c("0.00", "0.25", "0.50", "0.75", "1.00"), 
+                                 fontface='bold', cex=1.5),
+                                 labels=list(cex=18),
+                                 space = "bottom"), 
+          par.strip.text = list(col = "transparent"), #fontface='bold', cex=1.5
+          par.settings = list(axis.line = list(col = "transparent"),
+                              strip.background = list(col = 'transparent'), 
+                              strip.border = list(col = 'transparent')),
+          scales = list(draw=FALSE)) + 
+  latticeExtra::layer(sp.polygons(map.copy , fill = "transparent", alpha = 1, lwd=0.75, col = "grey80"))
+```
+    
+    
+### Expanded Model
+Adding additional variables. These are code examples only to show how random effects can be added, don't trust results!
+
+```{r}
+#Model 1
+#Model formula
+Frm.1 = Y ~ -1 + intercept.1 + # the -1 species we use a custom intercept (fixed effect)
+                f(Field.1,   #spatial index
+                   model=spde.1) + #spatial prior (random effect)
+                f(Year,         #random effect for year
+                   model="ar1", #autocorrelation between years
+                   constr=TRUE) + 
+                f(Species,   # iid random effect for spp differences (like a factor)
+        				   constr=TRUE, #center on zero
+        				   model="iid") +
+                Temperature + Precip #fixed effects
+       
+
+#theta1 = Model.1$internal.summary.hyperpar$mean
+#theta1 = c(-2.6943879, 2.4375067, -0.2267824, 2.1069014, 1.5681810) #previous run
+
+
+#Execute/run model
+Model.1 = inla(Frm.1, 
+               data = inla.stack.data(Stack.1, spde=spde.1), 
+               family = "poisson", 
+               verbose = TRUE,
+               control.predictor = list(
+                                      A = inla.stack.A(Stack.1 ), 
+                                      compute = TRUE, 
+                                      link = 1), 
+               control.mode = list(restart = TRUE), #mean estimate from first run, speeds up re-runs
+               control.compute=list(dic = TRUE, waic = TRUE)) 
+```
+
+## Model 2 with replicate in walk
+adding a random walk for each climatic variable for each species
+
+
 ```{r}
 #Model 2
 
-#Need to give the random walk a range:
+unique(factor(Model.in$species))
+unique(factor(Model.in2$Spp_rep))
 
-Model.in$range.air <- inla.group(Model.in$Air_temp_mean , n = 50, method = "quantile")
-Model.in$range.precip <- inla.group(Model.in$precip_mean, n = 50, method = "quantile")
+Model.in2 <- Model.in %>%
+  mutate(Spp_replicate = as.integer(factor(species))) # 1 = H. arm, 2 = H punc., 3 = H zea
 
-My.lst_rw = list(c(Field.1,  #Spatial Index
+
+Model.in2$range.air <- inla.group(Model.in2$Air_temp_mean , n = 50, method = "quantile")
+Model.in2$range.precip <- inla.group(Model.in2$precip_mean, n = 50, method = "quantile")
+
+
+
+My.lst2 = list(c(Field.1,  #Spatial Index
                 list(intercept.1 = 1)), #Intercept
-                list(Temperature = Model.in[,"range.air"],
-                     Precip = Model.in[,"range.precip"],
-                     Effort = Model.in[,"effort"],   #Number of samples
-                     Year = Model.in[,"year.int"],   #Index for year order
-                     Species = Model.in[,"species"], #Species variable
-                     Trap = Model.in[,"trap"]))  #Variability by trap location
+                list(Temperature = Model.in2[,"range.air"],
+                     Precip = Model.in2[,"range.precip"],
+                     Effort = Model.in2[,"effort"],   #Number of samples
+                     Year = Model.in2[,"year.int"],   #Index for year order
+                     Species = Model.in2[,"species"], #Species variable
+                     Spp_replicate = Model.in2[,"Spp_replicate"],
+                     Trap = Model.in2[,"trap"]))  #Variability by trap location
 
 
-
+summary(Model.in$precip_mean)
+summary(Model.in$Air_temp_mean)
 Model.in$Count.round = round(Model.in$mean_count, 0) #Response variable, rounded to integer
 range(Model.in$Count.round) 
 hist(Model.in$Count.round) #poisson-like, but very large values
 
-Stack_rw = inla.stack(data = list(Y = Model.in$Count.round), #Response variable  
+Stack.2 = inla.stack(data = list(Y = Model.in$Count.round), #Response variable  
                                   A = list(A.matrix, 1), #spatial matrix    
-                            effects = My.lst_rw, #all variables of interest
+                            effects = My.lst2, #all variables of interest
                                 tag = "moth.1") #arbitary label/name
 
 
-
-
-
-
-
 #Model formula
+
 Frm.2 = Y ~ -1 + intercept.1 + # the -1 species we use a custom intercept (fixed effect)
                 f(Field.1,   #spatial index
                    model=spde.1) + #spatial prior (random effect)
                 f(Year,         #random effect for year
                    model="ar1", #autocorrelation between years
                    constr=TRUE) + 
-
-                 f(Trap,   # iid random effect for spp differences (like a factor)
+                f(Spp_replicate,   # iid random effect for spp differences (like a factor)
         				   constr=TRUE, #center on zero
-        				   model="iid") +
-  
-                f(Species,   # iid random effect for spp differences (like a factor)
-        				   constr=TRUE, #center on zero
-        				   model="iid") +
+        				   model="iid")+
                 f(Temperature,     #Year index
-                  replicate = Species,
-                   model="rw1", # model as a random walk, smooth trend
+                   model="rw1",
+                  replicate = Spp_replicate,# model as a random walk, smooth trend
                    constr=TRUE) + 
                 f(Precip,     #Year index
-                   model="rw1", # model as a random walk, smooth trend
-                   constr=TRUE) #fixed effects
-
+                   model="rw1",
+                  replicate = Spp_replicate, # model as a random walk, smooth trend
+                   constr=TRUE)
+       
 
 #theta1 = Model.1$internal.summary.hyperpar$mean
 #theta1 = c(-2.6943879, 2.4375067, -0.2267824, 2.1069014, 1.5681810) #previous run
@@ -359,13 +471,394 @@ Frm.2 = Y ~ -1 + intercept.1 + # the -1 species we use a custom intercept (fixed
 
 #Execute/run model
 Model.2 = inla(Frm.2, 
-               data = inla.stack.data(Stack_rw, spde=spde.1), 
+               data = inla.stack.data(Stack.2, spde=spde.1), 
                family = "poisson", 
                verbose = TRUE,
                control.predictor = list(
-                                      A = inla.stack.A(Stack_rw ), 
+                                      A = inla.stack.A(Stack.2), 
                                       compute = TRUE, 
                                       link = 1), 
-               control.mode = list(restart = TRUE),# theta = theta1), #mean estimate from first run, speeds up re-runs
+               control.mode = list(restart = TRUE), #mean estimate from first run, speeds up re-runs
                control.compute=list(dic = TRUE, waic = TRUE)) 
 ```
+
+
+```{r}
+#Model 3
+
+unique(factor(Model.in$species))
+unique(factor(Model.in2$Spp_rep))
+
+Model.in2 <- Model.in %>%
+  mutate(Spp_replicate = as.integer(factor(species))) # 1 = H. arm, 2 = H punc., 3 = H zea
+
+
+Model.in2$range.air <- inla.group(Model.in2$Air_temp_mean , n = 50, method = "quantile")
+Model.in2$range.precip <- inla.group(Model.in2$precip_mean, n = 50, method = "quantile")
+
+
+
+My.lst3 = list(c(Field.1,  #Spatial Index
+                list(intercept.1 = 1)), #Intercept
+                list(Temperature = Model.in2[,"range.air"],
+                     Precip = Model.in2[,"range.precip"],
+                     Effort = Model.in2[,"effort"],   #Number of samples
+                     Year = Model.in2[,"year.int"],   #Index for year order
+                     Species = Model.in2[,"species"], #Species variable
+                     Spp_replicate = Model.in2[,"Spp_replicate"],
+                     Trap = Model.in2[,"trap"]))  #Variability by trap location
+
+
+summary(Model.in$precip_mean)
+summary(Model.in$Air_temp_mean)
+Model.in$Count.round = round(Model.in$mean_count, 0) #Response variable, rounded to integer
+range(Model.in$Count.round) 
+hist(Model.in$Count.round) #poisson-like, but very large values
+
+Stack.3 = inla.stack(data = list(Y = Model.in$Count.round), #Response variable  
+                                  A = list(A.matrix, 1), #spatial matrix    
+                            effects = My.lst2, #all variables of interest
+                                tag = "moth.1") #arbitary label/name
+
+
+#Model formula
+
+Frm.3 = Y ~ -1 + intercept.1 + # the -1 species we use a custom intercept (fixed effect)
+                f(Field.1,   #spatial index
+                   model=spde.1) + #spatial prior (random effect)
+                f(Year,         #random effect for year
+                   model="ar1", #autocorrelation between years
+                   constr=TRUE) + 
+                f(Spp_replicate,   # iid random effect for spp differences (like a factor)
+        				   constr=TRUE, #center on zero
+        				   model="iid")+
+                f(Trap,   # iid random effect for spp differences (like a factor)
+        				   constr=TRUE, #center on zero
+        				   model="iid")+
+                f(Temperature,     #Year index
+                   model="rw1",
+                  replicate = Spp_replicate,# model as a random walk, smooth trend
+                   constr=TRUE) + 
+                f(Precip,     #Year index
+                   model="rw1",
+                  replicate = Spp_replicate, # model as a random walk, smooth trend
+                   constr=TRUE)
+       
+
+#theta1 = Model.1$internal.summary.hyperpar$mean
+#theta1 = c(-2.6943879, 2.4375067, -0.2267824, 2.1069014, 1.5681810) #previous run
+
+
+#Execute/run model
+Model.3 = inla(Frm.3, 
+               data = inla.stack.data(Stack.3, spde=spde.1), 
+               family = "poisson", 
+               verbose = TRUE,
+               control.predictor = list(
+                                      A = inla.stack.A(Stack.3), 
+                                      compute = TRUE, 
+                                      link = 1), 
+               control.mode = list(restart = TRUE), #mean estimate from first run, speeds up re-runs
+               control.compute=list(dic = TRUE, waic = TRUE)) 
+```
+
+
+
+#Model 4
+this time switching replicate for group in the rw1
+
+```{r}
+#Model 4
+
+unique(factor(Model.in$species))
+unique(factor(Model.in2$Spp_rep))
+
+Model.in2 <- Model.in %>%
+  mutate(Spp_replicate_re = as.integer(factor(species)),
+         Spp_replicate_temp = as.integer(factor(species)),
+         Spp_replicate_precip = as.integer(factor(species))) # 1 = H. arm, 2 = H punc., 3 = H zea
+
+
+Model.in2$range.air <- inla.group(Model.in2$Air_temp_mean , n = 50, method = "quantile")
+Model.in2$range.precip <- inla.group(Model.in2$precip_mean, n = 50, method = "quantile")
+
+
+
+My.lst3 = list(c(Field.1,  #Spatial Index
+                list(intercept.1 = 1)), #Intercept
+                list(Temperature = Model.in2[,"range.air"],
+                     Precip = Model.in2[,"range.precip"],
+                     Effort = Model.in2[,"effort"],   #Number of samples
+                     Year = Model.in2[,"year.int"],   #Index for year order
+                     Species = Model.in2[,"species"], #Species variable
+                     Spp_replicate_re = Model.in2[,"Spp_replicate_re"],
+                     Spp_replicate_temp = Model.in2[,"Spp_replicate_temp"],
+                     Spp_replicate_precip = Model.in2[,"Spp_replicate_precip"],
+                     Trap = Model.in2[,"trap"]))  #Variability by trap location
+
+
+summary(Model.in$precip_mean)
+summary(Model.in$Air_temp_mean)
+Model.in$Count.round = round(Model.in$mean_count, 0) #Response variable, rounded to integer
+range(Model.in$Count.round) 
+hist(Model.in$Count.round) #poisson-like, but very large values
+
+Stack.3 = inla.stack(data = list(Y = Model.in$Count.round), #Response variable  
+                                  A = list(A.matrix, 1), #spatial matrix    
+                            effects = My.lst3, #all variables of interest
+                                tag = "moth.1") #arbitary label/name
+
+
+#Model formula
+
+Frm.4 = Y ~ -1 + intercept.1 + # the -1 species we use a custom intercept (fixed effect)
+                f(Field.1,   #spatial index
+                   model=spde.1) + #spatial prior (random effect)
+                f(Year,         #random effect for year
+                   model="ar1", #autocorrelation between years
+                   constr=TRUE) + 
+                f(Spp_replicate_re,   # iid random effect for spp differences (like a factor)
+        				   constr=TRUE, #center on zero
+        				   model="iid")+
+                f(Trap,   # iid random effect for spp differences (like a factor)
+        				   constr=TRUE, #center on zero
+        				   model="iid")+
+                f(Temperature,     #Year index
+                   model="rw1",
+                  group = Spp_replicate_temp,# model as a random walk, smooth trend
+                   constr=TRUE) + 
+                f(Precip,     #Year index
+                   model="rw1",
+                  group = Spp_replicate_precip, # model as a random walk, smooth trend
+                   constr=TRUE)
+       
+
+#theta1 = Model.1$internal.summary.hyperpar$mean
+#theta1 = c(-2.6943879, 2.4375067, -0.2267824, 2.1069014, 1.5681810) #previous run
+
+
+#Execute/run model
+Model.4 = inla(Frm.4, 
+               data = inla.stack.data(Stack.3, spde=spde.1), 
+               family = "poisson", 
+               verbose = TRUE,
+               control.predictor = list(
+                                      A = inla.stack.A(Stack.3), 
+                                      compute = TRUE, 
+                                      link = 1), 
+               control.mode = list(restart = TRUE), #mean estimate from first run, speeds up re-runs
+               control.compute=list(dic = TRUE, waic = TRUE)) 
+```
+
+
+
+```{r}
+summary(Model.0)
+summary(Model.1)
+summary(Model.2)
+summary(Model.3)
+summary(Model.4)
+
+plot(Model.2)
+
+Model.0$dic$dic
+Model.1$dic$dic
+Model.2$dic$dic
+Model.3$dic$dic
+Model.4$dic$dic
+
+
+p <- autoplot(Model.2)
+p <- autoplot(Model.3)
+
+```
+
+
+
+
+Species Effect
+```{r fig.width=8, fig.height=8}
+
+
+
+Model.2$summary.random$Species #species iid levels
+
+Model.in3 <- predict(Model.2,Model.in2)
+
+Model.2$summary.random
+
+my.data = as.data.frame(Model.2$summary.random$Species)
+names(my.data) = c("ID", "Mean", "sd", "Q025", "Q50", "Q975", "mode", "kld")
+
+ggplot(my.data, aes(ID, y=Mean)) + 
+                geom_point(size=3, pch=1, col = "red") +
+                geom_linerange(aes(ymin=Q025, ymax=Q975), colour="gray50") +
+                geom_hline(yintercept = 0, 
+                            linetype = "dotted",
+                               colour = "red",
+                               size = 0.75) +
+                    theme_classic() +
+                           xlab("Species") +
+                           ylab("Species Effect (log)") + 
+                            theme(plot.title = element_text(hjust = 0.5),
+                             axis.title.y = element_text(face="bold", size=18),
+                             axis.title.x = element_text(face="bold", size=18),
+                             title = element_text(face="bold", size=18, hjust=0.5),
+                             strip.text.x = element_text(face="bold", size = 14, colour = "black"),
+                             axis.text.y = element_text(face="bold", size=14),
+                             axis.text.x = element_text(face="bold", size=14, vjust=0.5))
+```
+
+
+map spatial field for expanded model
+```{r}
+pLoc = cbind(grid.pnts$pLong, grid.pnts$pLat) #coords
+
+pLoc = inla.mesh.map(pLoc, 
+                     projection = "longlat", 
+                     inverse = TRUE) # convert to 3D projection to match with mesh
+
+Ap = inla.spde.make.A(Global.mesh, loc=pLoc) #match to mesh
+
+grid.pnts$Spatial.Field = drop(Ap %*% Model.2$summary.random$Field.1$mean)  #mean values for spatial field, add to grid pnts
+
+#map to grid
+Model.2.rf = rasterize(grid.pnts, 
+                      World.r,
+                      field = "Spatial.Field", #
+                      background = NA) 
+
+```
+
+### Compare Spatial Random Field
+```{r fig.width=8, fig.height=10}
+Field.stack = stack(Model.0.rf, Model.2.rf)
+names(Field.stack) = c("Spatial.Only", "Expanded")
+
+
+
+range(values(Field.stack), na.rm=T)
+rng = seq(-19, 35, 0.01)
+
+
+mCols = (coolwarm(1000))
+
+cr = colorRampPalette(c(mCols), 
+         bias = 1.7, alpha = TRUE)
+
+
+levelplot(Field.stack,
+          layout = c(1,2),
+          margin = FALSE,
+          xlab = NULL, 
+          ylab = NULL, 
+          #main = "Occurrence Probabilty",
+          names.attr= c("Spatial Only", "Expanded"),
+          maxpixels = 1e5,
+          col.regions = cr, alpha.regions = 1, at = rng,
+          colorkey = list(labels=list(#at=c(0.02, 0.25, 0.50, 0.75, 0.98),  
+                                 #labels=c("0.00", "0.25", "0.50", "0.75", "1.00"), 
+                                 fontface='bold', cex=1.5),
+                                 labels=list(cex=18),
+                                 space = "bottom"), 
+          par.strip.text = list(col = "transparent"), #fontface='bold', cex=1.5
+          par.settings = list(axis.line = list(col = "transparent"),
+                              strip.background = list(col = 'transparent'), 
+                              strip.border = list(col = 'transparent')),
+          scales = list(draw=FALSE)) + 
+  latticeExtra::layer(sp.polygons(map.copy , fill = "transparent", alpha = 1, lwd=0.75, col = "grey80"))
+```
+
+### Looking at Air temp and precip relationships
+
+```{r}
+library(inlabru)
+pred_mod <- predict(Model.2,data=Model.in2)
+
+Model.4$summary.random$Spp_replicate_re
+trend.df = Model.4$summary.random$Temperature[,c(1,2,4,6)]   #pull estimates from model
+names(trend.df) = c("Temp", "Mean", "Q2.5", "Q97.5")  #rename
+
+Model.2$
+
+myspan = 0.5 #smoothness for ggplot
+ggplot(trend.df, aes(Temp, Mean)) +
+        geom_hline(yintercept = 0, 
+                   linetype = "solid",
+                   col = "darkgray",
+                   size = 0.5) +
+        geom_smooth(col = "black", 
+                  method = "gam",
+                  se = FALSE,
+                  lwd = 1) +
+        geom_smooth(data = trend.df, aes(Temp, Q2.5), 
+                    col = "grey40", 
+                    method = "gam",
+                    se = FALSE,
+                    linetype= "dashed",
+                    size=0.1) +
+        geom_smooth(data = trend.df, aes(Temp, Q97.5), 
+                    col = "grey40", 
+                    method = "gam",
+                    se = FALSE,
+                    linetype= "dashed",
+                    size=0.1) +
+        xlab(" ") +
+        ylab("Temperature Trend") +  
+        theme_classic() +
+        theme(axis.text=element_text(size=16),
+              panel.background = element_blank(),
+              plot.background = element_blank(),
+              panel.border = element_blank(),
+              legend.position = "none",
+              strip.background = element_blank(),
+              strip.text = element_text(face="bold", size = 22),
+              axis.title.y = element_text(face="bold", size = 24),
+              axis.text.x = element_text(face="bold", size=18, vjust=0.5, 
+                                         hjust=0.5, angle=0),
+              axis.title.x = element_text(face="bold", size = 26))
+
+
+trend.df = Model.4$summary.random$Precip[,c(1,2,4,6)]   #pull estimates from model
+names(trend.df) = c("Precip", "Mean", "Q2.5", "Q97.5")  #rename
+
+
+
+myspan = 0.5 #smoothness for ggplot
+ggplot(trend.df, aes(Precip, Mean)) +
+        geom_hline(yintercept = 0, 
+                   linetype = "solid",
+                   col = "darkgray",
+                   size = 0.5) +
+        geom_smooth(col = "black", 
+                  method = "loess",
+                  se = FALSE,
+                  lwd = 1) +
+        geom_smooth(data = trend.df, aes(Precip, Q2.5), 
+                    col = "grey40", 
+                    method = "loess",
+                    se = FALSE,
+                    linetype= "dashed",
+                    size=0.1) +
+        geom_smooth(data = trend.df, aes(Precip, Q97.5), 
+                    col = "grey40", 
+                    method = "loess",
+                    se = FALSE,
+                    linetype= "dashed",
+                    size=0.1) +
+        xlab(" ") +
+        ylab("Precipitation Trend") +  
+        theme_classic() +
+        theme(axis.text=element_text(size=16),
+              panel.background = element_blank(),
+              plot.background = element_blank(),
+              panel.border = element_blank(),
+              legend.position = "none",
+              strip.background = element_blank(),
+              strip.text = element_text(face="bold", size = 22),
+              axis.title.y = element_text(face="bold", size = 24),
+              axis.text.x = element_text(face="bold", size=18, vjust=0.5, 
+                                         hjust=0.5, angle=0),
+              axis.title.x = element_text(face="bold", size = 26))
+```
+
