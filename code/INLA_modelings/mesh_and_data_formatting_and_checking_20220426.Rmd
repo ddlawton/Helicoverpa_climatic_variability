@@ -1,0 +1,187 @@
+---
+title: "INLA_mesh_with_data_modeling"
+author: "Douglas Lawton"
+date: "4/26/2022"
+output: html_document
+---
+
+```{r}
+setwd("/Users/ddlawton/Dropbox (ASU)/Research/Postdoc/Helicoverpa_climatic_variability")
+```
+```{r}
+
+#Main modeling package
+suppressMessages(library(INLA))
+#install.packages("INLA",repos=c(getOption("repos"),INLA="https://inla.r-inla-download.org/R/stable"), dep=TRUE)
+
+#supporting packages
+suppressMessages(library(tidyverse))
+suppressMessages(library(data.table))
+suppressMessages(library(reshape2))
+suppressMessages(library(raster))
+suppressMessages(library(corrplot))
+suppressMessages(library(rasterVis))
+suppressMessages(library(rgeos))
+suppressMessages(library(rgl))
+suppressMessages(library(maptools))
+suppressMessages(library(mapproj))
+suppressMessages(library(spdep))
+suppressMessages(library(ggplot2))
+suppressMessages(library(ggthemes))
+suppressMessages(library(GISTools))
+suppressMessages(library(lattice))
+suppressMessages(library(gridExtra))
+suppressMessages(library(spatialEco))
+suppressMessages(library(dplyr))
+suppressMessages(library(sp))
+suppressMessages(library(pals))
+suppressMessages(library(splitstackshape))
+suppressMessages(library(anytime))
+suppressMessages(library(lubridate))
+```
+
+
+
+# Load in all the csv files and combine them into one file
+
+```{r}
+
+files <- list.files(path="data/processed/INLA_mesh_with_data_04262022",full.names = TRUE,pattern = ".csv")
+
+
+data <- read_csv(files) %>% bind_rows()
+
+#GEE somehow messed up the empty columns in the csvs that didnt have moth count data. I am going to manually fix it here. no biggie.
+
+data <- data %>%
+  mutate(mdn_cnt = NA,men_cnt=NA,nm_yr__=NA,nm_yrl_=NA,se_cont=NA,ttl_cnt=NA)
+
+
+
+files <- list.files(path="data/processed/INLA_mesh_with_data_04262022/manually_fix",full.names = TRUE,pattern = ".csv")
+
+
+data2 <- read_csv(files) %>% bind_rows() %>% rbind(data)
+
+```
+
+
+#Data cleaning
+
+
+```{r}
+
+#There are obs before the remotely sensed data is available -- filtering those out
+#Also, I had to import this data as a shapefile into GEE which shortened the names -- I am renaming them here
+
+data3 <- data2 %>% filter(year >= 1981) %>% 
+  rename(continent = contnnt,hemisphere = hemsphr,median_count = mdn_cnt, mean_count = men_cnt,num_yearly_trap_obs = nm_yr__,
+         num_yearly_traps = nm_yrl_,se_count = se_cont,total_count = ttl_cnt, year_before = yer_bfr) %>%
+  select(!c(year_before,time_nd,tm_strt))
+
+
+#Alright, now I am going to extract the coordinates from the .geo column
+
+data4 <- data3 %>%
+  mutate(coords = str_extract(.geo,'(?<=\\[).+?(?=\\])')) %>%
+  separate(coords,into=c("Latitude","Longitude"),sep=",")
+
+
+
+# So GEE exports all the RS data as an array in each row (eg [0.001,0.005,0.006,etc])
+# I need to extract the data and put it into a long format to throw it into the models.
+
+
+data5 <- data4 %>%
+  filter(soil_moist_1 != "[]") %>%
+  rowid_to_column(var="rowid") %>%
+  select(!c(`system:index`,.geo))
+
+data6 <- cSplit(setDT(data5)[, lapply(.SD, gsub, pattern = "[][]", 
+                          replacement = "")], names(data5), sep=",", fixed = FALSE, "long")
+head(data6)
+
+data7 <- data6 %>% 
+  tidyr::fill(rowid,.direction = "down") %>%
+  as_tibble() %>%
+  group_by(rowid) %>%
+  fill(continent,hemisphere,median_count,mean_count,num_yearly_trap_obs,num_yearly_traps,se_count,species,
+       trap,total_count,type,year,Latitude,Longitude,.direction="down")
+
+#Alright, now I am going to get the numbers into recognizable units and selecting for the final columns
+
+head(data7$soil_temp_2)
+data8 <- data7 %>%
+  mutate(Air_temp  = Air_temp - 273.15,
+         Precip = Precip * 1000,
+         dates = anytime::anytime(dates/1000),
+         soil_temp_1 = soil_temp_1 - 273.15,
+         soil_temp_2 = soil_temp_2 - 273.15,
+         avg_soil_temp = ((soil_temp_1) + (soil_temp_2)) / 2,
+         avg_soil_moist = ((soil_moist_1) + (soil_moist_2)) / 2) %>%
+  select(1:11,16:24)
+
+data9 <- data8 %>% drop_na(avg_soil_temp)
+
+```
+
+#Data formatting
+
+Next I want to format the environmental data into either off or on season climatic variables.I have taken into consideration that the hemisphere seasons are flipped. The assumption is that anything on or below the equator has an 'off' season which is totally opposite to that of the northern hemisphere.
+
+```{r}
+
+#First make the on/off seasons based off the vernal/autumnal equinoxes 
+
+data10 <- data9 %>%
+  mutate(
+    doy = yday(dates),
+    season = case_when(
+      hemisphere == "Northern" & doy>=79 & doy<=263 ~ "growing_season",
+      hemisphere == "Northern" & doy<=79 | doy>=263 ~ "off_season",
+      hemisphere == "Southern" & doy>=263 | doy<=79 ~ "growing_season",
+      hemisphere == "Southern" & doy<=263 & doy>=79 ~ "off_season",
+  ))
+
+#Next I am taking the average of the climatic variables by the seasonal parition for each unique observation.
+
+
+data11 <- data10 %>%
+  group_by(rowid,season) %>%
+  summarize(
+    continent = first(continent),
+    hemisphere = first(hemisphere),
+    median_count = first(median_count),
+    mean_count = first(mean_count),
+    num_yearly_trap_obs = first(num_yearly_trap_obs),
+    num_yearly_traps = first(num_yearly_traps),
+    se_count = first(se_count),
+    species = first(species),
+    total_count = first(total_count),
+    type = first(type),
+    year = first(year),
+    Latitude = first(Latitude),
+    Longitude = first(Longitude),
+    Air_temp = mean(Air_temp),
+    Precip = mean(Precip),
+    avg_soil_temp = mean(avg_soil_temp),
+    avg_soil_moist = mean(avg_soil_moist )
+  )
+  
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#####
