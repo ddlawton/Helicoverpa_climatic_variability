@@ -10,34 +10,15 @@ setwd("/Users/ddlawton/Dropbox (ASU)/Research/Postdoc/Helicoverpa_climatic_varia
 ```
 ```{r}
 
-#Main modeling package
-suppressMessages(library(INLA))
-#install.packages("INLA",repos=c(getOption("repos"),INLA="https://inla.r-inla-download.org/R/stable"), dep=TRUE)
+#Main package
 
-#supporting packages
 suppressMessages(library(tidyverse))
-suppressMessages(library(data.table))
-suppressMessages(library(reshape2))
-suppressMessages(library(raster))
-suppressMessages(library(corrplot))
-suppressMessages(library(rasterVis))
-suppressMessages(library(rgeos))
-suppressMessages(library(rgl))
-suppressMessages(library(maptools))
-suppressMessages(library(mapproj))
-suppressMessages(library(spdep))
-suppressMessages(library(ggplot2))
-suppressMessages(library(ggthemes))
-suppressMessages(library(GISTools))
-suppressMessages(library(lattice))
-suppressMessages(library(gridExtra))
-suppressMessages(library(spatialEco))
-suppressMessages(library(dplyr))
-suppressMessages(library(sp))
-suppressMessages(library(pals))
 suppressMessages(library(splitstackshape))
 suppressMessages(library(anytime))
 suppressMessages(library(lubridate))
+suppressMessages(library(ggpubr))
+suppressMessages(library(ggridges))
+suppressMessages(library(patchwork))
 ```
 
 
@@ -87,7 +68,7 @@ data4 <- data3 %>%
   separate(coords,into=c("Latitude","Longitude"),sep=",")
 
 
-
+length(unique(factor(data4$rowid)))
 # So GEE exports all the RS data as an array in each row (eg [0.001,0.005,0.006,etc])
 # I need to extract the data and put it into a long format to throw it into the models.
 
@@ -167,20 +148,149 @@ data11 <- data10 %>%
     avg_soil_temp = mean(avg_soil_temp),
     avg_soil_moist = mean(avg_soil_moist )
   )
-  
+
+
+
+```
+
+
+# Basic data exploration
+
+Okay everything looks fine. Lets do some basic viz on the data to confirm it looks good.
+
+```{r}
+final_dat <- data11 %>%
+  mutate(species = case_when(
+    species == NA ~ type,
+    TRUE ~ species
+  ))
+
+final_dat %>%
+  group_by(hemisphere,continent,season) %>% #The NAs in continent is from the mesh data
+  summarize(n=n())
+
+final_dat %>%
+  group_by(hemisphere,continent,type) %>%  #The NAs in continent is from the mesh data
+  summarize(n=n())  
+
+final_dat %>%
+  group_by(hemisphere,continent,species) %>%  #The NAs in continent and species is from the mesh data
+  summarize(n=n())  
+
+summary(final_dat)
+
+final_dat %>%
+  ungroup() %>%
+  select(Air_temp,Precip,avg_soil_temp,avg_soil_moist,type) %>%
+  pivot_longer(cols=1:4) %>%
+  ggplot(aes(x=value,y=type)) +
+  geom_density_ridges() +
+  facet_wrap(~name,scales="free")
+
+
+
+final_dat %>%
+  ungroup() %>%
+  select(Air_temp,Precip,avg_soil_temp,avg_soil_moist,type,season) %>%
+  pivot_longer(cols=1:4) %>%
+  ggplot(aes(x=value,y=season)) +
+  geom_density_ridges() +
+  facet_wrap(~name+type,scales="free")
+
+
+final_dat %>%
+  ungroup() %>%
+  select(median_count,mean_count,num_yearly_trap_obs,num_yearly_traps,se_count,total_count,species) %>%
+  pivot_longer(cols=1:6) %>%
+  ggplot(aes(x=value,y=species)) +
+  geom_density_ridges() +
+  facet_wrap(~name,scales="free")
 
 ```
 
 
 
+# Relationship between trapping effort and counts
+
+```{r}
+moth_data <- final_dat %>% filter(type=="data") %>% filter(season == "growing_season") #pick a season just to not have double points
+
+mean_total <- ggplot(moth_data,aes(x=total_count,y=mean_count)) + 
+  geom_point(pch=21) +
+  geom_smooth(size=1.25,
+              method = "gam", 
+              formula = y ~ s(x, bs = "tp", k = 10)) +
+  theme_pubr() +
+  ggtitle("Yearly mean count x total count")
+
+mean_num_traps <- ggplot(moth_data,aes(x=num_yearly_traps ,y=mean_count)) + 
+  geom_point(pch=21) +
+  geom_smooth(size=1.25,
+              method = "gam", 
+              formula = y ~ s(x, bs = "tp", k = 10)) +
+  theme_pubr() +
+  ggtitle("Yearly mean count x # of traps")
+
+
+mean_num_trap_obs <- ggplot(moth_data,aes(x=num_yearly_trap_obs,y=mean_count)) + 
+  geom_point(pch=21) +
+  geom_smooth(size=1.25,
+              method = "gam", 
+              formula = y ~ s(x, bs = "tp", k = 10)) +
+  theme_pubr() +
+  ggtitle("Yearly mean count x # of trap observations")
+
+(mean_total + mean_num_traps) /( mean_num_trap_obs + plot_spacer())
+
+```
+
+# Relationship between count and environmental variables
+
+```{r}
+
+air_temp <- ggplot(moth_data,aes(x=Air_temp,y=mean_count,color=species)) + 
+  #geom_point(pch=21) +
+  geom_smooth(size=1.25,
+              method = "gam", 
+              formula = y ~ s(x, bs = "tp", k = 10)) +
+  theme_pubr() +
+  ggtitle("Moth count x Air temp")
+
+precip <- ggplot(moth_data,aes(x=Precip,y=mean_count,color=species)) + 
+  #geom_point(pch=21) +
+  geom_smooth(size=1.25,
+              method = "gam", 
+              formula = y ~ s(x, bs = "tp", k = 10)) +
+  theme_pubr() +
+  ggtitle("Moth count x Precip")
+
+
+soil_temp <- ggplot(moth_data,aes(x=avg_soil_temp,y=mean_count,color=species)) + 
+  #geom_point(pch=21) +
+  geom_smooth(size=1.25,
+              method = "gam", 
+              formula = y ~ s(x, bs = "tp", k = 10)) +
+  theme_pubr()  +
+  ggtitle("Moth count x Soil temp")
+
+soil_moist <- ggplot(moth_data,aes(x=avg_soil_moist,y=mean_count,color=species)) + 
+  #geom_point(pch=21) +
+  geom_smooth(size=1.25,
+              method = "gam", 
+              formula = y ~ s(x, bs = "tp", k = 10)) +
+  theme_pubr() +
+  ggtitle("Moth count x Soil moist")
+
+(air_temp + precip) /( soil_temp + soil_moist)
+```
 
 
 
+Alright, I could keep on going with the data exploration, but I think I should stop here and get to starting to model this data. I am going to save the final data (final_data) as a csv to the processed folder to clear the work space.
 
-
-
-
-
+```{r}
+write.csv(final_dat,file="data/processed/INLA_data_mesh_20220426.csv")
+```
 
 
 
