@@ -1,0 +1,889 @@
+
+```{r}
+setwd("D:/Helicoverpa")
+```
+```{r}
+
+#Main modeling package
+suppressMessages(library(INLA))
+#install.packages("INLA",repos=c(getOption("repos"),INLA="https://inla.r-inla-download.org/R/stable"), dep=TRUE)
+
+#supporting packages
+suppressMessages(library(reshape2))
+suppressMessages(library(raster))
+suppressMessages(library(corrplot))
+suppressMessages(library(rasterVis))
+suppressMessages(library(rgeos))
+suppressMessages(library(rgl))
+suppressMessages(library(maptools))
+suppressMessages(library(mapproj))
+suppressMessages(library(spdep))
+suppressMessages(library(ggplot2))
+suppressMessages(library(ggthemes))
+suppressMessages(library(GISTools))
+suppressMessages(library(lattice))
+suppressMessages(library(gridExtra))
+suppressMessages(library(spatialEco))
+suppressMessages(library(dplyr))
+suppressMessages(library(sp))
+suppressMessages(library(pals))
+```
+
+# Observations
+```{r}
+rm(list=ls())
+
+Heli.df = fread("data/processed/INLA_data_mesh_20220426.csv", 
+                  header = TRUE, sep=",") %>% as_tibble() %>%
+  select(trap,season,mean_count,se_count,species,type,year,Latitude,Longitude,Air_temp,Precip,num_yearly_traps,num_yearly_trap_obs) %>%
+  pivot_wider(names_from = season,
+              values_from = c(Air_temp, Precip)) %>%
+  filter(type=="data") #filtering out all the mesh data just to look at the actual data
+
+#Heli.df$mean_count[is.na(Heli.df$mean_count)] <- 0
+
+
+dim(Heli.df)
+str(Heli.df)
+
+range(Heli.df$year)
+unique(Heli.df$species)
+
+range(Heli.df$Latitude)
+range(Heli.df$Longitude)
+
+range(Heli.df$num_yearly_traps,na.rm=TRUE) #sampling effort: number of traps per year
+range(Heli.df$num_yearly_trap_obs,na.rm=TRUE) #sampling effort: number of trap obs per year
+
+
+range(Heli.df$mean_count,na.rm=TRUE)
+length(which(is.na(Heli.df$se_count)))
+length(which(is.na(Heli.df))) #NAs come from the mesh data
+```
+
+
+## Observations to Spatial Points
+```{r}
+LL84 = "+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"
+
+Heli.pnts = SpatialPointsDataFrame(Heli.df[,c("Latitude","Longitude")], Heli.df)
+proj4string(Heli.pnts) = LL84
+
+plot(Heli.pnts, col="red", cex=0.1)
+```
+
+
+# Option 1 (Global Mesh)
+
+## Spatial Extents
+
+Load and simplify world boundaries
+```{r}
+LL84 = "+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"
+
+nProj = "+proj=merc +a=6378137 +b=6378137 +lat_ts=0 +lon_0=0
+         +x_0=0 +y_0=0 +k=1 +units=km +nadgrids=@null +no_defs"
+
+Countries = maps::map("world", 
+                fill = TRUE, 
+                plot = FALSE)
+
+
+IDs = sapply(strsplit(Countries$names, ":"), function(x) x[1])
+
+LL84 = "+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"
+
+Countries = map2SpatialPolygons(Countries, IDs = IDs,
+                                proj4string = CRS(projection(LL84)))
+
+Countries$Names = names(Countries)
+Countries.copy = Countries #for comparison
+Countries = subset(Countries, Names != "Antarctica" & Names != "Greenland") #Remove Antarctica and Greenlan
+
+Countries = gBuffer(Countries, width = 0) #fixes some topological issues
+
+#Add a dataframe  
+pid = sapply(slot(Countries, "polygons"), 
+             function(x) slot(x, "ID"))
+
+p.df = data.frame( ID=1:length(Countries), 
+                   row.names = pid)
+
+Countries = SpatialPolygonsDataFrame(Countries, p.df)
+map.copy = Countries
+
+#Remove small islands
+# breaks into separate polgons
+Countries = explode(Countries, sp=TRUE)
+
+#calculate area
+Countries$Area = gArea(Countries, byid = TRUE) #ignore projection warnings
+
+# Keep big areas
+Countries = subset(Countries, Area > 500) 
+Countries = gBuffer(Countries, width = 1) #smooting and enlarging
+
+plot(Countries.copy, main = "Original") 
+plot(Countries, main = "Simplified")
+plot(Heli.pnts, add=TRUE, col="red", cex=0.1)
+
+```
+
+
+
+
+Create a raster/grid version for mapping results
+```{r}
+blank.r = raster(res = 1, crs = proj4string(map.copy))
+
+extent(blank.r) = extent(map.copy)
+
+World.r = rasterize(map.copy, 
+                    blank.r,
+                    field = 0, #zero value in polgons
+                    background = NA) #value in oceans
+
+#View raster
+plot(World.r)
+
+#Point version for later mapping
+grid.pnts = rasterToPoints(World.r, sp = TRUE)
+
+grid.pnts@data = grid.pnts@data %>%
+                    mutate(pLong = grid.pnts@coords[,1],
+                           pLat = grid.pnts@coords[,2],
+                           Set = "grid") %>%
+                    select(-layer)
+```
+
+
+## Construct Global Mesh
+```{r}
+MaxEdge = 2.0 #controls edge lengths in triangulations
+
+bdry = inla.sp2segment(Countries) #formats for INLA package
+
+mesh2D = inla.mesh.2d(boundary = bdry, 
+                     cutoff = 1, 
+                     max.edge = MaxEdge,
+                     min.angle = 21) 
+
+plot(mesh2D) #Flat version
+
+MeshLocs = cbind(mesh2D$loc[,1], mesh2D$loc[,2]) #Pull coordinates from flat 2D mesh above (nodes/vertices)
+head(MeshLocs) #long/lat
+
+#Converting to 3D coordinates scaled to 1 Earth Radius
+xyz = as.data.frame(                
+          inla.mesh.map(MeshLocs, #coords from flat version
+                        projection = "longlat", 
+                        inverse = TRUE)) #invert from long/lat
+
+true.radius.of.earth = 6371 #1 Earth Radius
+radius.of.earth = 1 #scale radius to 1
+
+Global.mesh = inla.mesh.create(loc = xyz,
+                         cutoff = 100/true.radius.of.earth, #maximum length to allow
+                         refine=list(max.edge = 3500/true.radius.of.earth, min.angle = 26))
+
+
+Global.mesh$n #number of nodes. More nodes equal more precsion, but also more computer processing/memory
+
+plot(Global.mesh, rgl = TRUE, main = " ") #this code produces a pop-up window where you can click, zoom, and drag mesh in 3D
+
+plot(Global.mesh, #Fancy version above, showing mesh nodes over land
+     rgl=TRUE, 
+     col="lightblue", 
+     draw.vertices=TRUE, 
+     draw.edges=TRUE)
+```
+
+## Link Observations to Mesh 
+Matching observation locations to Global.mesh.
+```{r}
+locs = cbind(Heli.pnts$Longitude, Heli.pnts$Latitude) #get moth coords
+
+locs = inla.mesh.map(locs, 
+                     projection = "longlat", 
+                     inverse = TRUE) #invert to 3D coords to match with mesh
+
+
+A.matrix = inla.spde.make.A(Global.mesh, loc=locs) #create sparse matrix matching moth locations to geographic position on mesh
+```
+
+## Set Spatial Prior
+This model setting controls the strength of spatial effect (correlation decay)
+```{r}
+spde.1 = inla.spde2.pcmatern(Global.mesh,
+                             prior.range=c(0.9, 0.01), #First value is a spatial range (1 = 1 Earth Radius), second value is a probability
+                             prior.sigma=c(1, 0.01))  #similar to above, error
+                           
+
+#create a spatial index for each node
+Field.1 = inla.spde.make.index("Field.1", #arbitrary name for the spatial field
+                                spde.1$n.spde) #number of mesh nodes.  just an idex sthe model knows to estimate for each location
+
+str(Field.1) # just index 1 to number of nodes (9459)
+```
+
+
+
+
+## Nearest Neighbor Distances  
+```{r}
+#Need to project data to make more accurate distance measurements
+
+P.pp = spTransform(Heli.pnts, nProj) #Copy and project
+
+head(P.pp@coords) #new coordinates
+
+Heli.pnts$NN = spatstat.geom::nndist(P.pp@coords, k = 1) #spatstat.geom can conflict with other packages, k =  1 is "first" nearest neighbor    
+
+range(Heli.pnts$NN) # in km
+
+Heli.pnts$NN.round = round(Heli.pnts$NN/10, 1) #scaling and rounding
+
+range(Heli.pnts$NN.round) #will plug this into an rw in Model.1.
+
+```
+
+
+
+
+## Prepare Model Input  
+Example predictors and random effect indices.  
+```{r}
+#make copy of observations
+Model.in = Heli.pnts@data
+
+
+#Convert "Years" to an integer index 1 to total years
+range(Model.in$year)
+
+Model.in$Year.int = as.integer(as.factor(as.character(Model.in$year)))
+range(Model.in$Year.int) #41 years
+
+#simple way of acounting for number of samples
+Model.in$yearly_traps = Model.in$num_yearly_traps 
+Model.in$yearly_trap_obs = Model.in$num_yearly_trap_obs 
+
+range(Model.in$yearly_traps,na.rm=TRUE) 
+range(Model.in$yearly_trap_obs,na.rm=TRUE) 
+
+
+#Individual variation traps
+#length(unique(Model.in$trap))
+dim(Model.in)[1]
+
+Model.in$Trap.ind = as.integer(as.factor(Model.in$trap))
+range(Model.in$Trap.ind)
+
+```
+
+
+
+## Organize Data
+Because spatial index (Field.1) is a different length than moth dataframe, need to convert to a list object.  
+```{r}
+My.lst = list(c(Field.1,  #Spatial Index
+                list(intercept.1 = 1)), #Intercept
+                list(Temp_gs = Model.in[,"Air_temp_growing_season"], 
+                     Temp_os = Model.in[,"Air_temp_off_season"], 
+                     Precip_gs = Model.in[,"Precip_growing_season"], 
+                     Precip_os = Model.in[,"Precip_off_season"], 
+                     yearly_traps = Model.in[,"yearly_traps"],   #Number of samples
+                     yearly_trap_obs = Model.in[,"yearly_trap_obs"],   #Number of samples
+                     NN =  Model.in[,"NN.round"], #Nearest Neighbor distance
+                     Year = Model.in[,"Year.int"],   #Index for year order
+                     Trap = Model.in[,"Trap.ind"], #Variability by trap location 
+                     Species = Model.in[,"species"])) #Species variable
+
+
+
+Model.in$Count.round = round(Model.in$mean_count, 0) #Response variable, rounded to integer
+range(Model.in$Count.round,na.rm = TRUE) 
+hist(Model.in$Count.round) #poisson-like, but very large values
+
+Stack.1 = inla.stack(data = list(Y = Model.in$Count.round), #Response variable  
+                                  A = list(A.matrix, 1), #spatial matrix    
+                            effects = My.lst, #all variables of interest
+                                tag = "moth.1") #arbitary label/name
+```
+
+## Run Model
+
+### Simple model first, spatial effect only
+```{r}
+#Model formula
+Frm.0 = Y ~ -1 + intercept.1 + # the -1 species we use a custom intercept
+                  f(Field.1,   #spatial index
+                    model=spde.1) #spatial prior
+
+#theta0 = Model.0$internal.summary.hyperpar$mean
+theta0 = c(0.2406323, 2.1144357) #previous run hyperparameters
+
+
+Model.0 = inla(Frm.0, 
+               data = inla.stack.data(Stack.1, spde=spde.1), 
+               family = "poisson", 
+               verbose = TRUE,
+               control.predictor = list(
+                                      A = inla.stack.A(Stack.1 ), 
+                                      compute = TRUE, 
+                                      link = 1), 
+               control.mode = list(restart = TRUE, theta = theta0), #mean estimate from first run, speeds up re-runs
+               control.compute=list(dic = TRUE, waic = TRUE)) 
+```
+
+Results summary
+```{r}
+summary(Model.0) #intercept and spatial field 
+```
+    
+    
+    
+    
+    
+map spatial field
+```{r}
+pLoc = cbind(grid.pnts$pLong, grid.pnts$pLat) #coords
+
+pLoc = inla.mesh.map(pLoc, 
+                     projection = "longlat", 
+                     inverse = TRUE) # convert to 3D projection to match with mesh
+
+Ap = inla.spde.make.A(Global.mesh, loc=pLoc) #match to mesh
+
+grid.pnts$Spatial.Field = drop(Ap %*% Model.0$summary.random$Field.1$mean)  #mean values for spatial field, add to grid pnts
+
+#map to grid
+Model.0.rf = rasterize(grid.pnts, 
+                      World.r,
+                      field = "Spatial.Field", 
+                      background = NA) 
+plot(Model.0.rf)
+```
+    
+    
+    
+    
+    
+    
+    
+    
+    
+# Expanded Models
+
+##Linear trend of air temp and precip
+Adding additional variables.
+```{r}
+#Model formula
+Frm.1 = Y ~ -1 + intercept.1 + # the -1 species we use a custom intercept (fixed effect)
+                f(Field.1,   #spatial index
+                   model=spde.1) + #spatial prior (random effect)
+                f(Year.int,         #random effect for year
+                   model="ar1", #autocorrelation between years
+                   constr=TRUE) + 
+                f(NN.round,   #Nearest Neighbor
+                   model="rw1", 
+                   constr=TRUE,
+                   scale.model=TRUE) +
+                f(yearly_traps,   #Nearest Neighbor
+                   model="rw1", 
+                   constr=TRUE,
+                   scale.model=TRUE) +
+                f(yearly_trap_obs,   #Nearest Neighbor
+                   model="rw1", 
+                   constr=TRUE,
+                   scale.model=TRUE) +
+                f(Trap.ind,   # iid random effect for trap variation
+        				   constr=TRUE, 
+        				   model="iid") +
+                f(species,   # iid random effect for spp differences (like a factor)
+        				   constr=TRUE, #center on zero
+        				   model="iid") +
+                Air_temp_growing_season + 
+                Air_temp_off_season + 
+                Precip_growing_season +
+                Precip_off_season 
+
+#theta1 = Model.1$internal.summary.hyperpar$mean
+#theta1 = c(-2.3362336, 1.6831341, 0.5495259, 1.0261536, -3.7205470, -1.2528197, 0.5737816) #previous run
+
+
+#Execute/run model
+Model.1 = inla(Frm.1, 
+               data = inla.stack.data(Stack.1, spde=spde.1), 
+               family = "poisson", 
+               verbose = TRUE,
+               control.predictor = list(
+                                      A = inla.stack.A(Stack.1 ), 
+                                      compute = TRUE, 
+                                      link = 1), 
+               control.mode = list(restart = TRUE),# theta = theta1), #mean estimate from first run, speeds up re-runs
+               control.compute=list(dic = TRUE, waic = TRUE)) 
+```
+
+Some Results
+```{r}
+summary(Model.1) #summary
+
+Model.1$summary.hyperpar[4,] # Rho = correlation.  Years are correlated at about 0.77
+```
+
+
+
+##random walks of air temp and precip
+
+```{r}
+
+
+Model.in$range.precip_off <- inla.group(Model.in$Precip_off_season  , n = 50, method = "quantile")
+Model.in$range.precip_growing <- inla.group(Model.in$Precip_growing_season , n = 50, method = "quantile")
+Model.in$range.air_growing <- inla.group(Model.in$Air_temp_growing_season , n = 50, method = "quantile")
+Model.in$range.air_off <- inla.group(Model.in$Air_temp_off_season, n = 50, method = "quantile")
+
+
+
+
+
+My.lst_rw = list(c(Field.1,  #Spatial Index
+                list(intercept.1 = 1)), #Intercept
+                list(Temp_gs = Model.in[,"range.air_growing"], 
+                     Temp_os = Model.in[,"range.air_off"], 
+                     Precip_gs = Model.in[,"range.precip_growing"], 
+                     Precip_os = Model.in[,"range.precip_off"], 
+                     yearly_traps = Model.in[,"yearly_traps"],   #Number of samples
+                     yearly_trap_obs = Model.in[,"yearly_trap_obs"],   #Number of samples
+                     NN =  Model.in[,"NN.round"], #Nearest Neighbor distance
+                     Year = Model.in[,"Year.int"],   #Index for year order
+                     Trap = Model.in[,"Trap.ind"], #Variability by trap location 
+                     Species = Model.in[,"species"])) #Species variable
+
+
+Model.in$Count.round = round(Model.in$mean_count, 0) #Response variable, rounded to integer
+range(Model.in$Count.round) 
+hist(Model.in$Count.round) #poisson-like, but very large values
+
+Stack_rw = inla.stack(data = list(Y = Model.in$Count.round), #Response variable  
+                                  A = list(A.matrix, 1), #spatial matrix    
+                            effects = My.lst_rw, #all variables of interest
+                                tag = "moth.1") #arbitary label/name
+
+
+
+
+
+
+
+#Model formula
+Frm.2 = Y ~ -1 + intercept.1 + # the -1 species we use a custom intercept (fixed effect)
+                f(Field.1,   #spatial index
+                   model=spde.1) + #spatial prior (random effect)
+                f(Year.int,         #random effect for year
+                   model="ar1", #autocorrelation between years
+                   constr=TRUE) + 
+                f(NN.round,   #Nearest Neighbor
+                   model="rw1", 
+                   constr=TRUE,
+                   scale.model=TRUE) +
+                f(yearly_traps,   #Nearest Neighbor
+                   model="rw1", 
+                   constr=TRUE,
+                   scale.model=TRUE) +
+                f(yearly_trap_obs,   #Nearest Neighbor
+                   model="rw1", 
+                   constr=TRUE,
+                   scale.model=TRUE) +
+                f(Trap.ind,   # iid random effect for trap variation
+        				   constr=TRUE, 
+        				   model="iid") +
+                f(species,   # iid random effect for spp differences (like a factor)
+        				   constr=TRUE, #center on zero
+        				   model="iid") +
+                f(range.air_growing,   #Nearest Neighbor
+                   model="rw1", 
+                   constr=TRUE,
+                   scale.model=TRUE) +
+                f(range.air_off,   #Nearest Neighbor
+                   model="rw1", 
+                   constr=TRUE,
+                   scale.model=TRUE) +
+                f(range.precip_growing,   #Nearest Neighbor
+                   model="rw1", 
+                   constr=TRUE,
+                   scale.model=TRUE) +
+                f(range.precip_off,   #Nearest Neighbor
+                   model="rw1", 
+                   constr=TRUE,
+                   scale.model=TRUE) 
+
+#theta1 = Model.1$internal.summary.hyperpar$mean
+#theta1 = c(-2.3362336, 1.6831341, 0.5495259, 1.0261536, -3.7205470, -1.2528197, 0.5737816) #previous run
+
+
+#Execute/run model
+Model.2 = inla(Frm.2, 
+               data = inla.stack.data(Stack_rw, spde=spde.1), 
+               family = "poisson", 
+               verbose = TRUE,
+               control.predictor = list(
+                                      A = inla.stack.A(Stack_rw), 
+                                      compute = TRUE, 
+                                      link = 1), 
+               control.mode = list(restart = TRUE),# theta = theta1), #mean estimate from first run, speeds up re-runs
+               control.compute=list(dic = TRUE, waic = TRUE)) 
+```
+
+
+```{r}
+Model.0$dic$dic
+Model.1$dic$dic
+Model.2$dic$dic
+```
+
+
+
+
+
+##random walks of air temp and precip per species
+
+```{r}
+
+
+Model.in$range.precip_off <- inla.group(Model.in$Precip_off_season  , n = 50, method = "quantile")
+Model.in$range.precip_growing <- inla.group(Model.in$Precip_growing_season , n = 50, method = "quantile")
+Model.in$range.air_growing <- inla.group(Model.in$Air_temp_growing_season , n = 50, method = "quantile")
+Model.in$range.air_off <- inla.group(Model.in$Air_temp_off_season, n = 50, method = "quantile")
+
+Model.in$species_rep1 <- as.integer(as.factor(Model.in$species))
+Model.in$species_rep2 <- as.integer(as.factor(Model.in$species))
+Model.in$species_rep3 <- as.integer(as.factor(Model.in$species))
+Model.in$species_rep4 <- as.integer(as.factor(Model.in$species))
+
+
+#as.numeric(levels(as.factor(Model.in$species)))[Model.in$species]
+
+#Model.in$MySppReplicates_1 = as.integer(levels(as.factor(Model.in$species)))
+#Model.in$MySppReplicates_2 = as.integer(levels(as.factor(Model.in$species)))
+#Model.in$MySppReplicates_3 = as.integer(levels(as.factor(Model.in$species)))
+#Model.in$MySppReplicates_4 = as.integer(levels(as.factor(Model.in$species)))
+
+#MySppReplicates = as.integer(levels(as.factor(MyDataframe$Species)))
+
+My.lst_rw = list(c(Field.1,  #Spatial Index
+                list(intercept.1 = 1)), #Intercept
+                list(Temp_gs = Model.in[,"range.air_growing"], 
+                     Temp_os = Model.in[,"range.air_off"], 
+                     Precip_gs = Model.in[,"range.precip_growing"], 
+                     Precip_os = Model.in[,"range.precip_off"], 
+                     yearly_traps = Model.in[,"yearly_traps"],   #Number of samples
+                     yearly_trap_obs = Model.in[,"yearly_trap_obs"],   #Number of samples
+                     NN =  Model.in[,"NN.round"], #Nearest Neighbor distance
+                     Year = Model.in[,"Year.int"],   #Index for year order
+                     Trap = Model.in[,"Trap.ind"], #Variability by trap location 
+                     Species = Model.in[,"species"],
+                     species_rep1 = Model.in[,"species_rep1"],
+                     species_rep2 = Model.in[,"species_rep2"],
+                     species_rep3 = Model.in[,"species_rep3"],
+                     species_rep4 = Model.in[,"species_rep4"])) #Species variable
+
+
+Model.in$Count.round = round(Model.in$mean_count, 0) #Response variable, rounded to integer
+range(Model.in$Count.round) 
+hist(Model.in$Count.round) #poisson-like, but very large values
+
+Stack_rw = inla.stack(data = list(Y = Model.in$Count.round), #Response variable  
+                                  A = list(A.matrix, 1), #spatial matrix    
+                            effects = My.lst_rw, #all variables of interest
+                                tag = "moth.1") #arbitary label/name
+
+
+
+
+
+
+
+#Model formula
+Frm.3 = Y ~ -1 + intercept.1 + # the -1 species we use a custom intercept (fixed effect)
+                f(Field.1,   #spatial index
+                   model=spde.1) + #spatial prior (random effect)
+                f(Year.int,         #random effect for year
+                   model="ar1", #autocorrelation between years
+                   constr=TRUE) + 
+                f(NN.round,   #Nearest Neighbor
+                   model="rw1", 
+                   constr=TRUE,
+                   scale.model=TRUE) +
+                f(yearly_traps,   #Nearest Neighbor
+                   model="rw1", 
+                   constr=TRUE,
+                   scale.model=TRUE) +
+                f(yearly_trap_obs,   #Nearest Neighbor
+                   model="rw1", 
+                   constr=TRUE,
+                   scale.model=TRUE) +
+                f(Trap.ind,   # iid random effect for trap variation
+        				   constr=TRUE, 
+        				   model="iid") +
+                f(species,   # iid random effect for spp differences (like a factor)
+        				   constr=TRUE, #center on zero
+        				   model="iid") +
+                f(range.air_growing,   #Nearest Neighbor
+                   model="rw1",
+                   replicate = species_rep1,
+                   constr=TRUE,
+                   scale.model=TRUE) +
+                f(range.air_off,   #Nearest Neighbor
+                   model="rw1",
+                   replicate = species_rep2 ,
+                   constr=TRUE,
+                   scale.model=TRUE) +
+                f(range.precip_growing,   #Nearest Neighbor
+                   model="rw1",
+                   replicate = species_rep3,
+                   constr=TRUE,
+                   scale.model=TRUE) +
+                f(range.precip_off,   #Nearest Neighbor
+                   model="rw1",
+                   replicate = species_rep4, 
+                   constr=TRUE,
+                   scale.model=TRUE) 
+
+#theta1 = Model.1$internal.summary.hyperpar$mean
+#theta1 = c(-2.3362336, 1.6831341, 0.5495259, 1.0261536, -3.7205470, -1.2528197, 0.5737816) #previous run
+
+
+#Execute/run model
+Model.3 = inla(Frm.3, 
+               data = inla.stack.data(Stack_rw, spde=spde.1), 
+               family = "poisson", 
+               verbose = TRUE,
+               control.predictor = list(
+                                      A = inla.stack.A(Stack_rw), 
+                                      compute = TRUE, 
+                                      link = 1), 
+               control.mode = list(restart = TRUE),# theta = theta1), #mean estimate from first run, speeds up re-runs
+               control.compute=list(dic = TRUE, waic = TRUE)) 
+```
+
+
+
+
+```{r}
+Model.0$dic$dic
+Model.1$dic$dic
+Model.2$dic$dic
+Model.3$dic$dic
+
+
+Model.0$waic$waic
+Model.1$waic$waic
+Model.2$waic$waic
+Model.3$waic$waic
+
+```
+
+
+
+
+
+
+
+### View Spatial Random Field
+Model error, latencies, model residuals, etc.
+```{r fig.width=8, fig.height=8}
+range(values(Model.0.rf), na.rm=T)
+rng = seq(-18, 0, 22)
+
+
+mCols = (coolwarm(1000))
+
+cr = colorRampPalette(c(mCols), 
+         bias = 1.7, alpha = TRUE)
+
+
+levelplot(Model.0.rf),
+          margin = FALSE,
+          xlab = NULL, 
+          ylab = NULL, 
+          maxpixels = 1e5,
+          col.regions = cr, alpha.regions = 1, at = rng,
+          colorkey = list(labels=list(#at=c(0.02, 0.25, 0.50, 0.75, 0.98),  
+                                 #labels=c("0.00", "0.25", "0.50", "0.75", "1.00"), 
+                                 fontface='bold', cex=1.5),
+                                 labels=list(cex=18),
+                                 space = "bottom"), 
+          par.strip.text = list(col = "transparent"), #fontface='bold', cex=1.5
+          par.settings = list(axis.line = list(col = "transparent"),
+                              strip.background = list(col = 'transparent'), 
+                              strip.border = list(col = 'transparent')),
+          scales = list(draw=FALSE)) + 
+  latticeExtra::layer(sp.polygons(map.copy , fill = "transparent", alpha = 1, lwd=0.75, col = "grey80"))
+```
+    
+
+Nearest Neighbors   
+
+Curve looks Kind of crazy, but looks like it helps some...
+```{r fig.width=8, fig.height=8, warning=FALSE}
+mic.df = as.data.frame(Model.3$summary.random$NN[,1:6])
+names(mic.df) = c("ID", "Mean", "sd", "Q025", "Q50", "Q975") #The "ID" column are the distances
+
+ggplot(mic.df, aes(ID*10, Mean)) + #Previously scaled by 10
+        geom_smooth(method = "loess",
+                    se = FALSE, col = "black", 
+                    linetype= "solid") +
+        geom_smooth(data = mic.df, aes(ID*10, Q025), 
+                    method = "loess",
+                    se = FALSE, col = "grey", 
+                    linetype= "dashed") +
+        geom_smooth(data = mic.df, aes(ID*10, Q975), 
+                    method = "loess",
+                    se = FALSE, col = "grey", 
+                    linetype= "dashed") +
+        geom_hline(yintercept = 0, 
+                   linetype = "dotted",
+                   col = "red",
+                   size = 1) + 
+        geom_vline(xintercept = 0, 
+                   linetype = "dotted",
+                   col = "red",
+                   size = 1) +
+        xlim(0,25) +
+        xlab("Distance (km)") +
+        ylab("Fine-scale spatial structure (log)") +
+        theme_classic() +
+         theme(plot.title = element_text(hjust = 0.5),
+                             axis.title.y = element_text(face="bold", size=18),
+                             axis.title.x = element_text(face="bold", size=18),
+                             title = element_text(face="bold", size=18, hjust=0.5),
+                             strip.text.x = element_text(face="bold", size = 14, colour = "black"),
+                             axis.text.y = element_text(face="bold", size=14),
+                             axis.text.x = element_text(face="bold", size=14, vjust=0.5))
+
+```
+
+
+Trap level variation  
+Red points exclude 0 from credible interval.  
+```{r fig.width=8, fig.height=8}
+my.data = as.data.frame(Model.3$summary.random$Trap)
+names(my.data) = c("ID", "Mean", "sd", "Q025", "Q50", "Q975", "mode", "kld")
+
+my.data$Important = ifelse(my.data$Q025 < 0 & my.data$Q975 < 0, 1,
+                     ifelse(my.data$Q025 > 0 & my.data$Q975 > 0, 1, 0)) #Check credible intervals
+
+Important.set = my.data %>% filter(Important == 1)
+NotImportant.set = my.data %>% filter(Important == 0)
+
+ggplot(NotImportant.set, aes(ID, Mean)) + 
+        geom_point(size=2, pch=1, col = "gray75") +
+        geom_linerange(aes(ymin=Q025, ymax=Q975), colour="gray75", size = 0.5) +
+        geom_point(data=Important.set, aes(ID, Mean), 
+                   size=2, pch=19, col = "red") +
+        geom_linerange(data=Important.set, aes(ymin=Q025, ymax=Q975), colour="black") +
+        geom_hline(yintercept = 0, 
+                    linetype = "dotted",
+                       colour = "red",
+                       size = 0.75) +
+            theme_classic() +
+                   xlab("Individual Trap") +
+                   ylab("Trap variation (log)") + 
+                    theme(plot.title = element_text(hjust = 0.5),
+                             axis.title.y = element_text(face="bold", size=18),
+                             axis.title.x = element_text(face="bold", size=18),
+                             title = element_text(face="bold", size=18, hjust=0.5),
+                             strip.text.x = element_text(face="bold", size = 14, colour = "black"),
+                             axis.text.y = element_text(face="bold", size=14),
+                             axis.text.x = element_text(face="bold", size=14, vjust=0.5))
+
+```
+
+
+Species Effect
+```{r fig.width=8, fig.height=8}
+Model.3$summary.random$Species #species iid levels
+
+my.data = as.data.frame(Model.1$summary.random$species)
+names(my.data) = c("ID", "Mean", "sd", "Q025", "Q50", "Q975", "mode", "kld")
+
+ggplot(my.data, aes(ID, y=Mean)) + 
+                geom_point(size=3, pch=1, col = "red") +
+                geom_linerange(aes(ymin=Q025, ymax=Q975), colour="gray50") +
+                geom_hline(yintercept = 0, 
+                            linetype = "dotted",
+                               colour = "red",
+                               size = 0.75) +
+                    theme_classic() +
+                           xlab("Species") +
+                           ylab("Species Effect (log)") + 
+                            theme(plot.title = element_text(hjust = 0.5),
+                             axis.title.y = element_text(face="bold", size=18),
+                             axis.title.x = element_text(face="bold", size=18),
+                             title = element_text(face="bold", size=18, hjust=0.5),
+                             strip.text.x = element_text(face="bold", size = 14, colour = "black"),
+                             axis.text.y = element_text(face="bold", size=14),
+                             axis.text.x = element_text(face="bold", size=14, vjust=0.5))
+```
+
+
+map spatial field for expanded model
+```{r}
+pLoc = cbind(grid.pnts$pLong, grid.pnts$pLat) #coords
+
+pLoc = inla.mesh.map(pLoc, 
+                     projection = "longlat", 
+                     inverse = TRUE) # convert to 3D projection to match with mesh
+
+Ap = inla.spde.make.A(Global.mesh, loc=pLoc) #match to mesh
+
+grid.pnts$Spatial.Field = drop(Ap %*% Model.1$summary.random$Field.1$mean)  #mean values for spatial field, add to grid pnts
+
+#map to grid
+Model.3.rf = rasterize(grid.pnts, 
+                      World.r,
+                      field = "Spatial.Field", #
+                      background = NA) 
+
+```
+
+### Compare Spatial Random Field
+```{r fig.width=8, fig.height=10}
+Field.stack = stack(Model.0.rf, Model.1.rf)
+names(Field.stack) = c("Expanded")
+
+
+range(values(Field.stack), na.rm=T)
+rng = seq(-24, 52, 0.01)
+
+
+mCols = (coolwarm(1000))
+
+cr = colorRampPalette(c(mCols), 
+         bias = 1.7, alpha = TRUE)
+
+
+levelplot(Field.stack,
+          layout = c(1),
+          margin = FALSE,
+          xlab = NULL, 
+          ylab = NULL, 
+          #main = "Occurrence Probabilty",
+          names.attr= c("Spatial Only", "Expanded"),
+          maxpixels = 1e5,
+          col.regions = cr, alpha.regions = 1, at = rng,
+          colorkey = list(labels=list(#at=c(0.02, 0.25, 0.50, 0.75, 0.98),  
+                                 #labels=c("0.00", "0.25", "0.50", "0.75", "1.00"), 
+                                 fontface='bold', cex=1.5),
+                                 labels=list(cex=18),
+                                 space = "bottom"), 
+          par.strip.text = list(col = "transparent"), #fontface='bold', cex=1.5
+          par.settings = list(axis.line = list(col = "transparent"),
+                              strip.background = list(col = 'transparent'), 
+                              strip.border = list(col = 'transparent')),
+          scales = list(draw=FALSE)) + 
+  latticeExtra::layer(sp.polygons(map.copy , fill = "transparent", alpha = 1, lwd=0.75, col = "grey80"))
+```
+
+
