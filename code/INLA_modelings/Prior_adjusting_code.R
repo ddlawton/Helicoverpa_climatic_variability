@@ -21,7 +21,6 @@ Heli.df = fread("data/processed/INLA_data_mesh_20220426.csv",
          species_rep1 = as.integer(as.factor(species)),
          species_rep2 = as.integer(as.factor(species)),
          range.air_off = inla.group(Air_temp_off_season, n = 50, method = "quantile"),
-         range.precip_off = inla.group(Precip_off_season, n = 50, method = "quantile"),
          mean_count = round(mean_count))#filtering out all the mesh data just to look at the actual data
 
 
